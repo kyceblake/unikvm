@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Edge handoff cursor placement
+
+- The first paired test confirmed edge sessions and return messages. The operator reported a visible center jump during handoff.
+- Removed the Windows sender's center warp and switched edge-session movement to relative Raw Input. Edge entry lands two desktop units inside the receiving edge at the normalized crossing height. The Mac publishes its entry position immediately and restores its return position before showing the cursor.
+- Windows workspace checks passed. The native probe verified a quarter-height entry near the left edge without triggering local takeover. Apple Silicon and x86-64 Linux passed cross-target Clippy.
+- Next, verify live crossings near the top and bottom in both directions with a relative Windows mouse and Mac trackpad.
+
 ## 2026-11-14 — Phase 4 fixed display edge
 
 - Accepted the two-machine input MVP and added opt-in horizontal edge switching for the primary displays of a pinned bidirectional pair. Opposite `peer_side` settings are required. Crossing carries a normalized pointer height, and crossing back returns the original sender's keyboard and pointer locally.

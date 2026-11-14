@@ -94,7 +94,9 @@ impl DisplayRect {
             Edge::Right if dx > 0 && x >= edge.pixel => {}
             _ => return None,
         }
-        let y = (i64::from(point.y) + i64::from(dy)).clamp(edge.start, edge.end - 1);
+        let distance = (edge.pixel - i64::from(point.x)).unsigned_abs();
+        let vertical = i64::from(dy) * distance as i64 / i64::from(dx.unsigned_abs());
+        let y = (i64::from(point.y) + vertical).clamp(edge.start, edge.end - 1);
         let span = edge.end - edge.start - 1;
         Some(
             ((y - edge.start) * i64::from(u16::MAX) + span / 2)
@@ -328,5 +330,10 @@ mod tests {
             windows.horizontal_crossing(Edge::Left, Point { x: -1, y: 720 }, -2, 0),
             None
         );
+        // Only half of this diagonal motion was needed to reach the shared edge.
+        let diagonal = windows
+            .horizontal_crossing(Edge::Left, Point { x: 5, y: 710 }, -10, 20)
+            .unwrap();
+        assert_eq!(diagonal, height);
     }
 }

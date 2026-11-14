@@ -49,7 +49,8 @@ impl MacInputSink {
         self.display = CGDisplay::main();
         self.bounds = self.display.bounds();
         self.pointer = CGPoint::new(f64::from(point.x), f64::from(point.y));
-        Ok(())
+        // Publish the new position immediately through the same tagged path as motion.
+        self.move_pointer(0, 0)
     }
 
     pub fn exit_edge(&self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {

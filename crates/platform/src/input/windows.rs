@@ -26,9 +26,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, HHOOK, HOOKPROC, KBDLLHOOKSTRUCT,
     LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE,
     MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    WM_XBUTTONUP,
 };
 
 use super::EdgeLayout;
@@ -36,6 +37,7 @@ use super::capture::{
     ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state, request_start,
 };
 use super::edge::EdgeTrigger;
+use super::windows_raw_mouse::RawMouse;
 use unikvm_core::geometry::Point;
 
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
@@ -55,7 +57,7 @@ struct HookState {
     swallowed_keys: [bool; 256],
     swallowed_buttons: [bool; 5],
     anchor: POINT,
-    parked_from: Option<Point>,
+    raw_motion: bool,
     stopped_generation: Option<u64>,
     generation: Option<u64>,
     arm_until: Instant,
@@ -80,6 +82,7 @@ pub(super) fn run_hooks(
         return Err(io::Error::last_os_error());
     }
     check_input_desktop()?;
+    let raw_mouse = edge.map(|_| RawMouse::new()).transpose()?;
     let mut last_pointer = POINT::default();
     // SAFETY: GetCursorPos writes to this owned POINT.
     if unsafe { GetCursorPos(&mut last_pointer) } == 0 {
@@ -97,7 +100,7 @@ pub(super) fn run_hooks(
             swallowed_keys: [false; 256],
             swallowed_buttons: [false; 5],
             anchor: POINT::default(),
-            parked_from: None,
+            raw_motion: false,
             stopped_generation: None,
             generation: None,
             arm_until: Instant::now(),
@@ -146,15 +149,10 @@ pub(super) fn run_hooks(
                     if now >= expires || (!state.remote && now >= state.arm_until) {
                         state.emergency();
                     } else if !state.remote && !physical_input_held() {
-                        // SAFETY: GetCursorPos writes to this owned POINT.
-                        if check_input_desktop().is_err()
-                            || unsafe { GetCursorPos(&mut state.anchor) } == 0
-                        {
+                        if check_input_desktop().is_err() {
                             state.emergency();
-                        } else if !edge || state.park_for_capture() {
-                            state.remote = true;
                         } else {
-                            state.emergency();
+                            state.begin_capture(edge);
                         }
                     }
                 }
@@ -168,6 +166,17 @@ pub(super) fn run_hooks(
             // SAFETY: These Win32 calls access only this thread's queue and initialized message.
             if unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) } == 0 {
                 break;
+            }
+            if message.message == WM_INPUT
+                && let Some((dx, dy)) = raw_mouse
+                    .as_ref()
+                    .and_then(|mouse| mouse.delta(message.hwnd, message.lParam))
+            {
+                HOOK_STATE.with(|state| {
+                    let mut state = state.borrow_mut();
+                    let state = state.as_mut().expect("hook state initialized");
+                    state.relative_motion(dx, dy);
+                });
             }
             unsafe { DispatchMessageW(&message) };
         }
@@ -194,6 +203,27 @@ pub(super) fn run_hooks(
 }
 
 impl HookState {
+    fn begin_capture(&mut self, edge: bool) {
+        // SAFETY: GetCursorPos writes to this owned POINT. Edge sessions use
+        // raw relative motion, so they never need to relocate the cursor.
+        if !edge && unsafe { GetCursorPos(&mut self.anchor) } == 0 {
+            self.emergency();
+            return;
+        }
+        self.raw_motion = edge;
+        self.remote = true;
+    }
+
+    fn relative_motion(&mut self, dx: i32, dy: i32) {
+        self.check_capture_command();
+        if self.remote && self.raw_motion {
+            self.enqueue(InputEvent::PointerMove {
+                dx: dx.clamp(-32768, 32768),
+                dy: dy.clamp(-32768, 32768),
+            });
+        }
+    }
+
     fn emergency(&mut self) {
         self.local(None);
         self.stopped_generation = self.generation;
@@ -283,6 +313,9 @@ impl HookState {
             activity(&self.shortcuts);
         }
         if message == WM_MOUSEMOVE && self.remote {
+            if self.raw_motion {
+                return true;
+            }
             let dx = event
                 .pt
                 .x
@@ -367,40 +400,18 @@ impl HookState {
 
     fn local(&mut self, return_height: Option<u16>) {
         self.remote = false;
-        let Some(saved) = self.parked_from.take() else {
+        if !std::mem::take(&mut self.raw_motion) {
             return;
-        };
-        let returned = return_height
+        }
+        let point = return_height
             .zip(self.edge.as_ref())
             .and_then(|(height, edge)| edge.layout.place(height).ok());
-        if let Some(point) =
-            returned.or_else(|| super::windows_edge::place(saved).ok().map(|()| saved))
-        {
+        if let Some(point) = point {
             self.last_pointer = POINT {
                 x: point.x,
                 y: point.y,
             };
         }
-    }
-
-    fn park_for_capture(&mut self) -> bool {
-        let Some(edge) = &self.edge else {
-            return false;
-        };
-        let saved = Point {
-            x: self.anchor.x,
-            y: self.anchor.y,
-        };
-        let Ok(point) = edge.layout.park() else {
-            return false;
-        };
-        self.parked_from = Some(saved);
-        self.anchor = POINT {
-            x: point.x,
-            y: point.y,
-        };
-        self.last_pointer = self.anchor;
-        true
     }
 }
 
@@ -579,7 +590,7 @@ mod tests {
             swallowed_keys: [false; 256],
             swallowed_buttons: [false; 5],
             anchor: POINT::default(),
-            parked_from: None,
+            raw_motion: false,
             stopped_generation: None,
             generation: None,
             arm_until: Instant::now(),
@@ -649,5 +660,32 @@ mod tests {
         assert_eq!(state.borrow().activity, 1);
         assert!(!hooks.key(&key, false));
         assert_eq!(state.borrow().activity, 1);
+    }
+
+    #[test]
+    fn edge_capture_suppresses_legacy_motion_and_forwards_relative_motion_once() {
+        let (shortcuts, _) = watch::channel(Shortcut::default());
+        let (events, mut captured) = mpsc::channel(4);
+        let mut hooks = hook_state(shortcuts, events);
+        let (_commands, receiver) = watch::channel(Command::Remote {
+            generation: 1,
+            expires: Instant::now() + Duration::from_secs(1),
+            edge: true,
+        });
+        hooks.commands = receiver;
+        hooks.remote = true;
+        hooks.raw_motion = true;
+        let mouse = MSLLHOOKSTRUCT {
+            pt: POINT { x: 0, y: 230 },
+            ..Default::default()
+        };
+        assert!(hooks.pointer(&mouse, WM_MOUSEMOVE));
+        assert!(captured.try_recv().is_err());
+        hooks.relative_motion(-4, 2);
+        assert_eq!(
+            captured.try_recv().unwrap(),
+            InputEvent::PointerMove { dx: -4, dy: 2 }
+        );
+        assert!(captured.try_recv().is_err());
     }
 }

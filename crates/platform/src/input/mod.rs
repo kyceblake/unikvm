@@ -25,6 +25,8 @@ mod windows_edge;
 #[cfg(target_os = "windows")]
 mod windows_motion;
 #[cfg(target_os = "windows")]
+mod windows_raw_mouse;
+#[cfg(target_os = "windows")]
 mod windows_sink;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

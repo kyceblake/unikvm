@@ -296,11 +296,13 @@ impl TapState {
     }
 
     fn return_locally(&mut self, height: Option<u16>) {
-        let was_sending = self.cursor.is_some();
-        self.local();
-        if was_sending && let (Some(height), Some(edge)) = (height, &self.edge) {
-            let _ = edge.layout.place(height);
+        if let (Some(cursor), Some(height), Some(edge)) = (&mut self.cursor, height, &self.edge)
+            && let Ok(point) = edge.layout.entry(height)
+        {
+            // The cursor guard restores its anchor before revealing it.
+            cursor.anchor = CGPoint::new(f64::from(point.x), f64::from(point.y));
         }
+        self.local();
     }
 
     fn enqueue(&mut self, event: InputEvent) -> bool {

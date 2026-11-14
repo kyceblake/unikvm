@@ -2,6 +2,11 @@ use std::io;
 
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::CGPoint;
+#[cfg(test)]
+use core_graphics::{
+    event::CGEvent,
+    event_source::{CGEventSource, CGEventSourceStateID},
+};
 use unikvm_core::geometry::{DisplayRect, Point};
 
 pub(super) fn primary() -> io::Result<DisplayRect> {
@@ -27,4 +32,17 @@ pub(super) fn has_display(point: Point) -> bool {
 pub(super) fn place(point: Point) -> io::Result<()> {
     CGDisplay::warp_mouse_cursor_position(CGPoint::new(f64::from(point.x), f64::from(point.y)))
         .map_err(|status| io::Error::other(format!("could not place macOS cursor ({status})")))
+}
+
+#[cfg(test)]
+pub(super) fn position() -> io::Result<Point> {
+    let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+        .map_err(|()| io::Error::other("could not read macOS cursor"))?;
+    let point = CGEvent::new(source)
+        .map_err(|()| io::Error::other("could not read macOS cursor"))?
+        .location();
+    Ok(Point {
+        x: point.x.round() as i32,
+        y: point.y.round() as i32,
+    })
 }

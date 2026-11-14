@@ -24,7 +24,7 @@ For a Mac immediately to the left of the PC, add `peer_side = "left"` to the Win
 
 Move the PC mouse to the left edge of the primary Windows display. The pointer should appear near the Mac's right edge at the matching relative height. Move back through that edge with the same mouse to return. For the reverse test, move the Mac trackpad cursor to the Mac's right edge, then use that trackpad to cross back from the left edge of Windows. Release any held keys and buttons before crossing. Ctrl+Shift+F9 starts shortcut-based sharing and Ctrl+Shift+F10 ends either type of session.
 
-The fixed layout uses the primary displays and reserves edges occupied by local monitors for the native desktop. Restart the agents after changing the primary displays. The Windows sender parks its cursor on its primary display while forwarding an edge session. Use one blank editor on each machine to verify pointer and keyboard focus. Monitor selection and synchronized layouts remain future work.
+The fixed layout uses the primary displays and reserves edges occupied by local monitors for the native desktop. Restart the agents after changing the primary displays. The Windows sender holds its cursor at the exit edge and reads relative mouse motion during edge sharing. Use one blank editor on each machine to verify pointer and keyboard focus. Monitor selection and synchronized layouts remain future work.
 
 ## Test input sharing
 

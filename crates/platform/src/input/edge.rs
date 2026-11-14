@@ -47,42 +47,14 @@ impl EdgeLayout {
     }
 
     pub(super) fn place(self, height: u16) -> io::Result<Point> {
+        let point = self.entry(height)?;
+        native::place(point)?;
+        Ok(point)
+    }
+
+    pub(super) fn entry(self, height: u16) -> io::Result<Point> {
         // Refresh the destination coordinates if its mode changed since startup.
-        let point = native::primary()?.horizontal_entry(self.side, height, 16);
-        native::place(point)?;
-        Ok(point)
-    }
-
-    #[cfg(target_os = "windows")]
-    pub(super) fn park(self) -> io::Result<Point> {
-        let point = native::primary()?.horizontal_entry(self.side, 32768, u32::MAX);
-        native::place(point)?;
-        Ok(point)
-    }
-}
-
-#[cfg(all(test, target_os = "windows"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "requires an interactive Windows input desktop"]
-    fn places_the_pointer_inside_the_primary_edge_without_takeover() {
-        struct Restore(Point);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                let _ = native::place(self.0);
-            }
-        }
-
-        let _restore = Restore(native::position().unwrap());
-        let capture = super::super::Capture::start(false).unwrap();
-        let baseline = capture.shortcuts.borrow().activity;
-        let edge = EdgeLayout::primary(Edge::Left).unwrap();
-        let point = edge.place(32768).unwrap();
-        assert_eq!(native::position().unwrap(), point);
-        assert!(edge.display.contains(point));
-        assert_eq!(capture.shortcuts.borrow().activity, baseline);
+        Ok(native::primary()?.horizontal_entry(self.side, height, 2))
     }
 }
 
@@ -107,5 +79,37 @@ impl EdgeTrigger {
         let height = self.layout.crossing(point, dx, dy)?;
         self.last = Some(now);
         Some(height)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive input desktop"]
+    fn places_the_pointer_inside_the_primary_edge_without_takeover() {
+        struct Restore(Point);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = native::place(self.0);
+            }
+        }
+
+        let _restore = Restore(native::position().unwrap());
+        let edge = EdgeLayout::primary(Edge::Left).unwrap();
+        let capture = super::super::Capture::with_edge(true, Some(edge)).unwrap();
+        let baseline = capture.shortcuts.borrow().activity;
+        let height = u16::MAX / 4;
+        let point = edge.entry(height).unwrap();
+        let mut sink = super::super::InputSink::new().unwrap();
+        sink.enter_edge(edge, height).unwrap();
+        assert_eq!(native::position().unwrap(), point);
+        assert!(edge.display.contains(point));
+        assert_eq!(
+            point,
+            edge.display.horizontal_entry(Edge::Left, u16::MAX / 4, 2)
+        );
+        assert_eq!(capture.shortcuts.borrow().activity, baseline);
     }
 }
