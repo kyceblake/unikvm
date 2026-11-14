@@ -10,10 +10,12 @@ use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, version};
 use thiserror::Error;
+use tokio::sync::watch;
 use tokio::time::{sleep, timeout};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use unikvm_protocol::peer::{ALPN, READY};
 
+use crate::discovery::Discovery;
 use crate::identity::{Fingerprint, Identity, TLS_NAME, TrustedPeer};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,7 +24,8 @@ const MAX_RETRY: Duration = Duration::from_secs(8);
 pub struct PeerEndpoint {
     endpoint: Endpoint,
     client: quinn::ClientConfig,
-    address: SocketAddr,
+    address: Option<SocketAddr>,
+    advertise: Option<Fingerprint>,
     peer: TrustedPeer,
     dialer: bool,
 }
@@ -72,7 +75,8 @@ enum SessionError {
 impl PeerEndpoint {
     pub fn bind(
         local: SocketAddr,
-        address: SocketAddr,
+        address: Option<SocketAddr>,
+        discovery: bool,
         identity: &Identity,
         peer: TrustedPeer,
     ) -> Result<Self, BindError> {
@@ -130,6 +134,7 @@ impl PeerEndpoint {
             endpoint,
             client,
             address,
+            advertise: discovery.then_some(own),
             dialer: own < peer.fingerprint,
             peer,
         })
@@ -146,20 +151,55 @@ impl PeerEndpoint {
         shutdown: impl Future<Output = ()>,
         mut on_event: impl FnMut(PeerEvent),
     ) {
-        tokio::select! {
-            () = self.maintain(&mut on_event) => {}
-            () = shutdown => {}
+        let discovery = self.advertise.and_then(|own| {
+            self.endpoint
+                .local_addr()
+                .map_err(crate::discovery::DiscoveryError::from)
+                .and_then(|local| Discovery::start(local, own, self.peer.fingerprint))
+                .inspect_err(|error| warn!(%error, "could not start mDNS discovery"))
+                .ok()
+        });
+        let (addresses, hints) = watch::channel(Vec::new());
+        {
+            let browse = async {
+                if let Some(discovery) = &discovery {
+                    discovery.browse(self.peer.fingerprint, addresses).await;
+                }
+                std::future::pending::<()>().await;
+            };
+            tokio::select! {
+                () = self.maintain(&mut on_event, hints) => {}
+                () = shutdown => {}
+                () = browse => {}
+            }
         }
         self.endpoint.close(0u32.into(), b"agent stopping");
         let _ = timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
+        if let Some(discovery) = discovery {
+            discovery.shutdown().await;
+        }
     }
 
-    async fn maintain(&self, on_event: &mut impl FnMut(PeerEvent)) {
-        info!(peer = %self.peer.fingerprint, address = %self.address, dialer = self.dialer, "peer transport ready");
+    async fn maintain(
+        &self,
+        on_event: &mut impl FnMut(PeerEvent),
+        mut hints: watch::Receiver<Vec<SocketAddr>>,
+    ) {
+        info!(peer = %self.peer.fingerprint, manual_address = ?self.address, discovery = self.advertise.is_some(), dialer = self.dialer, "peer transport ready");
         let mut delay = Duration::from_millis(250);
+        let mut next = 0usize;
         loop {
             let result = if self.dialer {
-                self.dial().await
+                let candidates = dial_candidates(self.address, &hints.borrow_and_update());
+                if candidates.is_empty() {
+                    if hints.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                let address = candidates[next % candidates.len()];
+                next = next.wrapping_add(1);
+                self.dial(address).await
             } else {
                 self.receive().await
             };
@@ -177,17 +217,26 @@ impl PeerEndpoint {
                 }
             }
             if self.dialer {
-                sleep(delay).await;
-                delay = (delay * 2).min(MAX_RETRY);
+                tokio::select! {
+                    () = sleep(delay) => delay = (delay * 2).min(MAX_RETRY),
+                    () = async {
+                        if hints.changed().await.is_err() {
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        delay = Duration::from_millis(250);
+                        next = 0;
+                    }
+                }
             }
         }
     }
 
-    async fn dial(&self) -> Result<Connection, SessionError> {
+    async fn dial(&self, address: SocketAddr) -> Result<Connection, SessionError> {
         timeout(CONNECT_TIMEOUT, async {
             let connection = self
                 .endpoint
-                .connect_with(self.client.clone(), self.address, TLS_NAME)?
+                .connect_with(self.client.clone(), address, TLS_NAME)?
                 .await?;
             self.confirm(connection).await
         })
@@ -198,7 +247,11 @@ impl PeerEndpoint {
     async fn receive(&self) -> Result<Connection, SessionError> {
         let incoming = loop {
             let incoming = self.endpoint.accept().await.ok_or(SessionError::Closed)?;
-            if incoming.remote_address().ip() != self.address.ip() {
+            if self.advertise.is_none()
+                && self
+                    .address
+                    .is_some_and(|address| incoming.remote_address().ip() != address.ip())
+            {
                 incoming.refuse();
                 continue;
             }
@@ -238,6 +291,18 @@ impl PeerEndpoint {
         }
         Ok(connection)
     }
+}
+
+fn dial_candidates(manual: Option<SocketAddr>, hints: &[SocketAddr]) -> Vec<SocketAddr> {
+    let mut addresses = Vec::with_capacity(hints.len() + 1);
+    addresses.extend(manual);
+    addresses.extend(
+        hints
+            .iter()
+            .copied()
+            .filter(|address| Some(*address) != manual),
+    );
+    addresses
 }
 
 #[cfg(test)]

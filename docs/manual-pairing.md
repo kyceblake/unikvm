@@ -44,3 +44,11 @@ cargo run --locked -p unikvm-agent -- --config local-pairing/agent.toml
 Both terminals should log `authenticated peer connected`. Stop one agent with Ctrl+C and start it again with the same configuration and identity. Each agent should log another authenticated connection. If neither connects, check that the reciprocal IPs and UDP ports are correct. Set `log_level = "debug"` above `[network]` to see connection failures.
 
 Remove the `[network]` table and restart an agent to revoke its local approval. Restore networking by explicitly verifying and configuring an approved peer again. Changing a LAN address requires updating the configuration. Identity rotation requires repeating fingerprint approval on the other machine.
+
+## Discover the paired address
+
+After manual pairing works, add `discovery = true` under `[network]` on both machines. Keep the certificate and fingerprint entries. The agents advertise and browse `_unikvm._udp.local.` on the interface selected by their specific `listen` address.
+
+You can keep `peer` as an explicit address. The dialer tries it first, then tries discovered addresses if the connection fails. To test discovery by itself, remove the `peer` line from both configs and restart the agents. With debug logging enabled, look for `updated mDNS address hints for configured peer` on the dialer and `authenticated peer connected` on both machines.
+
+Discovery needs local multicast DNS on UDP 5353 and runs on one configured address family and interface at a time. The QUIC connection still needs its own UDP port. When multicast is unavailable, restore the `peer` entry and set `discovery = false`. If this machine's own address changes, update `listen`. Discovery can learn the other machine's new address once it advertises there.

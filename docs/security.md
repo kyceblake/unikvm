@@ -8,7 +8,9 @@ The current agent exposes one read-only health/status query over native local IP
 
 ## Manual peer trust
 
-The opt-in QUIC endpoint uses TLS 1.3 and requires client certificates. On each machine the configured SHA-256 fingerprint must match the imported public certificate. Rustls validates both sides against the configured certificate, and the application requires an exact match of the presented leaf before exchanging readiness frames. TLS resumption is disabled so a reconnect presents certificates again. The source IP filter limits incoming attempts. The certificate identifies the peer.
+The opt-in QUIC endpoint uses TLS 1.3 and requires client certificates. On each machine the configured SHA-256 fingerprint must match the imported public certificate. Rustls validates both sides against the configured certificate, and the application requires an exact match of the presented leaf before exchanging readiness frames. TLS resumption is disabled so a reconnect presents certificates again. In manual-only mode, a source IP filter limits incoming attempts. Discovery mode permits a trusted peer's source IP to change and continues to require address validation and certificate authentication.
+
+mDNS publishes the certificate fingerprint and listening endpoint on the selected LAN interface. Advertisements can only supply addresses for the fingerprint already in the local config. They cannot change that config or grant trust. A spoofed hint can cause failed connection attempts, with retries bounded by the transport's backoff. A successful session still requires proof of possession of the pinned private key.
 
 Installation identities use self-signed Ed25519 certificates. The device ID is the first 128 bits of the certificate digest. Trust uses the entire SHA-256 fingerprint. Windows protects the private identity file using current-user DPAPI. macOS and Linux use an owned file with mode 0600 or stricter. macOS Keychain and Linux Secret Service integration are future work. Use a directory that only the account owner can modify.
 

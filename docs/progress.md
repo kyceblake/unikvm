@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — mDNS address discovery for an approved peer
+
+- Verified manual pairing on the Windows PC and Mac over the LAN. The Windows agent reported an authenticated connection to the Mac, and the Mac operator confirmed its side.
+- Added opt-in DNS-SD on the interface selected by the agent's listen address. The dialer can use mDNS hints for the already pinned peer, alongside an optional manual address. Mutual TLS and explicit certificate approval still govern trust.
+- Windows formatting, strict Clippy, workspace build, and 25 standard tests passed. A separate Windows LAN test connected two local QUIC endpoints using multicast DNS alone. Dependency policy and RustSec checks passed. Cross-target Clippy covered Apple Silicon macOS and x86-64 Linux.
+- Next, run the [discovery-only walkthrough](manual-pairing.md#discover-the-paired-address) on the Windows PC and Mac. Follow with support for multiple trusted peers and a three-agent continuity test.
+
 ## 2026-11-14 — First Phase 2 networking slice
 
 - Pulled the macOS IPC fix at `af268b0`. GitHub CI passed on Windows, macOS, and Linux for that revision.

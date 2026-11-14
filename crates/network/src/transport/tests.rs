@@ -3,7 +3,19 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 
-use super::{Identity, PeerEndpoint, SessionError, TLS_NAME, TrustedPeer};
+use super::{Identity, PeerEndpoint, SessionError, TLS_NAME, TrustedPeer, dial_candidates};
+
+#[test]
+fn prefers_the_manual_address_and_deduplicates_discovered_addresses() {
+    let manual = "192.168.1.10:24800".parse().unwrap();
+    let discovered = "192.168.1.20:24800".parse().unwrap();
+    assert_eq!(
+        dial_candidates(Some(manual), &[discovered, manual]),
+        [manual, discovered]
+    );
+    assert_eq!(dial_candidates(None, &[discovered]), [discovered]);
+    assert_eq!(dial_candidates(Some(manual), &[]), [manual]);
+}
 
 fn pair() -> (PeerEndpoint, PeerEndpoint, Identity, Identity) {
     let local = SocketAddr::from(([127, 0, 0, 1], 0));
@@ -14,23 +26,30 @@ fn pair() -> (PeerEndpoint, PeerEndpoint, Identity, Identity) {
     let approved_b =
         || TrustedPeer::approve(b_id.certificate().to_vec(), b_id.fingerprint()).unwrap();
     // Allocate B first, then set its dial target to A once A has a bound port.
-    let mut b = PeerEndpoint::bind(local, local, &b_id, approved_a()).unwrap();
-    let a = PeerEndpoint::bind(local, b.local_addr().unwrap(), &a_id, approved_b()).unwrap();
-    b.address = a.local_addr().unwrap();
+    let mut b = PeerEndpoint::bind(local, Some(local), false, &b_id, approved_a()).unwrap();
+    let a = PeerEndpoint::bind(
+        local,
+        Some(b.local_addr().unwrap()),
+        false,
+        &a_id,
+        approved_b(),
+    )
+    .unwrap();
+    b.address = Some(a.local_addr().unwrap());
     (a, b, a_id, b_id)
 }
 
 #[tokio::test]
 async fn mutually_pinned_peers_can_connect_in_both_directions() {
     let (a, b, _, _) = pair();
-    let (outgoing, incoming) = tokio::join!(a.dial(), b.receive());
+    let (outgoing, incoming) = tokio::join!(a.dial(b.local_addr().unwrap()), b.receive());
     let (a_conn, b_conn) = (outgoing.unwrap(), incoming.unwrap());
     a_conn.close(0u32.into(), b"test rotation");
     timeout(Duration::from_secs(2), b_conn.closed())
         .await
         .unwrap();
 
-    let (outgoing, incoming) = tokio::join!(b.dial(), a.receive());
+    let (outgoing, incoming) = tokio::join!(b.dial(a.local_addr().unwrap()), a.receive());
     assert!(outgoing.is_ok());
     assert!(incoming.is_ok());
 }
@@ -76,7 +95,8 @@ async fn running_peer_reconnects_when_listener_restarts() {
     let restored = Identity::from_bytes(&listener_id.to_bytes()).unwrap();
     let listener = PeerEndpoint::bind(
         listen_address,
-        dial_address,
+        Some(dial_address),
+        false,
         &restored,
         TrustedPeer::approve(dialer_id.certificate().to_vec(), dialer_id.fingerprint()).unwrap(),
     )
@@ -97,19 +117,22 @@ async fn rejects_unknown_client_and_server_certificates() {
     let local = SocketAddr::from(([127, 0, 0, 1], 0));
     let unapproved = PeerEndpoint::bind(
         local,
-        b.local_addr().unwrap(),
+        Some(b.local_addr().unwrap()),
+        false,
         &stranger,
         TrustedPeer::approve(b_id.certificate().to_vec(), b_id.fingerprint()).unwrap(),
     )
     .unwrap();
 
-    let (client_result, server_result) = tokio::join!(unapproved.dial(), b.receive());
+    let (client_result, server_result) =
+        tokio::join!(unapproved.dial(b.local_addr().unwrap()), b.receive());
     assert!(matches!(client_result, Err(SessionError::Connection(_))));
     assert!(matches!(server_result, Err(SessionError::Connection(_))));
 
     let unknown_server = PeerEndpoint::bind(
         local,
-        a.local_addr().unwrap(),
+        Some(a.local_addr().unwrap()),
+        false,
         &stranger,
         TrustedPeer::approve(a_id.certificate().to_vec(), a_id.fingerprint()).unwrap(),
     )

@@ -12,4 +12,6 @@ QUIC uses TLS 1.3 with mutual certificate authentication and ALPN `unikvm/1`. Af
 
 ## LAN protocol direction
 
+For address discovery, agents opt in to advertising and browsing `_unikvm._udp.local.`. The first 128 bits of the certificate fingerprint, in lowercase hex, form the instance name. TXT records contain `version=1` and `fingerprint` with the full SHA-256 certificate digest. SRV and address records provide the candidate UDP endpoint. The dialer considers at most four discovered addresses from the directly connected subnet and selected interface. mDNS records are unauthenticated.
+
 The future protobuf schema will negotiate a protocol version and capabilities, validate inbound data, and frame control messages on bounded reliable QUIC streams. File contents will use dedicated streams. Evaluate datagrams for sequenced mouse motion after profiling the coalesced reliable path. Key and button releases require reliable delivery and local cleanup on control loss.

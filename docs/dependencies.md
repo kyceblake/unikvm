@@ -31,12 +31,18 @@ Tokio's fixed buffers, timers and local transports cover the status path. On Win
 
 Use one crypto provider to limit the dependency and native build surface. The dependency license check now includes ISC and BSD-3-Clause for the reviewed crypto stack. Windows identity files use DPAPI through the existing Windows bindings. [Quinn endpoint](https://docs.rs/quinn/0.11.12/quinn/struct.Endpoint.html), [Rustls client certificate verifier](https://docs.rs/rustls/0.23.46/rustls/server/struct.WebPkiClientVerifier.html), [tempfile identity persistence primitive](https://docs.rs/tempfile/3.27.0/tempfile/struct.NamedTempFile.html#method.persist_noclobber), [Windows DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
 
+## Adopted for mDNS discovery
+
+| Crate | Stable release | Declared MSRV | License | Published | Decision |
+| --- | --- | --- | --- | --- | --- |
+| [mdns-sd](https://crates.io/crates/mdns-sd) | 0.21.7 | 1.71 | Apache-2.0 OR MIT | 2026-11-02 | Register, browse, and remove DNS-SD records with async event delivery and interface scoping. |
+| [if-addrs](https://crates.io/crates/if-addrs) | 0.15.0 | Unspecified | MIT OR BSD-3-Clause | 2026-02-08 | Reuse the discovery library's interface dependency to select the local interface and validate hints against its subnet. |
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |
 | --- | --- | --- | --- | --- | --- |
 | [ed25519-dalek](https://crates.io/crates/ed25519-dalek) | 3.0.0 | 1.85 | BSD-3-Clause | 2026-07-06 | Consider only if a separately justified signing role remains after selecting certificate identity. |
-| [mdns-sd](https://crates.io/crates/mdns-sd) | 0.21.7 | 1.71 | Apache-2.0 OR MIT | 2026-11-02 | Register and browse DNS-SD records. Verify dual-stack address handling and interface changes. |
 | [prost](https://crates.io/crates/prost) | 0.14.6 | 1.85 | Apache-2.0 | 2026-11-12 | Versioned protobuf LAN messages. Decide how to provide protoc reproducibly when introducing schema generation. |
 | [ratatui](https://crates.io/crates/ratatui) | 0.30.2 | 1.88 | MIT | 2026-06-19 | Terminal rendering and lifecycle. Build a status view once real peer data is available. |
 | [crossterm](https://crates.io/crates/crossterm) | 0.29.0 | 1.63 | MIT | 2025-04-05 | Terminal events for Ratatui. Recheck matching Ratatui backend features when wiring the TUI. |

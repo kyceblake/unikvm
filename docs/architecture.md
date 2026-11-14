@@ -12,7 +12,7 @@ Each installation runs a headless user-session agent. Opt-in networking gives ea
 | `protocol` | Versioned local status frames and peer protocol identifiers. |
 | `platform` | Native IPC, credential storage, and stand-alone input experiments. Native handle types stay inside this boundary and its application callers. |
 | `config` | TOML schema, defaults, and validation. |
-| `network` | Certificate identity, peer verification, and QUIC connection lifecycle. |
+| `network` | Certificate identity, peer verification, mDNS address discovery, and QUIC connection lifecycle. |
 | `clipboard`, `transfer` | Crate boundaries for clipboard synchronization and approved transfers. |
 
 The platform input interfaces planned for backend implementation are `InputCapture`, `InputSink`, `HotkeyBackend`, `DisplayProvider`, `ClipboardBackend`, `ApprovalPrompt`, and `CredentialStore`. Define their contracts against working native paths as each phase needs them. The probe has no dependency on the agent.

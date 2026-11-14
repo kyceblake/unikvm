@@ -9,6 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+if-addrs.workspace = true
+mdns-sd.workspace = true
 quinn.workspace = true
 rcgen.workspace = true
 ring.workspace = true

@@ -35,7 +35,9 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     pub listen: SocketAddr,
-    pub peer: SocketAddr,
+    pub peer: Option<SocketAddr>,
+    #[serde(default)]
+    pub discovery: bool,
     pub identity: PathBuf,
     pub peer_certificate: PathBuf,
     pub peer_fingerprint: String,
@@ -63,6 +65,10 @@ pub enum ConfigError {
         "listen and peer must have matching address families and nonzero ports, and peer must be a unicast address"
     )]
     NetworkAddress,
+    #[error("configure a manual peer address or enable discovery")]
+    PeerAddressRequired,
+    #[error("discovery requires listen to use a specific non-loopback LAN address")]
+    DiscoveryAddress,
 }
 
 impl Config {
@@ -82,15 +88,27 @@ impl Config {
             return Err(ConfigError::Version(config.schema_version));
         }
         if let Some(network) = &config.network {
-            let ip = network.peer.ip();
-            if network.listen.is_ipv4() != network.peer.is_ipv4()
-                || network.listen.port() == 0
-                || network.peer.port() == 0
-                || ip.is_unspecified()
-                || ip.is_multicast()
-                || ip == std::net::Ipv4Addr::BROADCAST
+            if network.listen.port() == 0
+                || network.listen.ip().is_multicast()
+                || network.listen.ip() == std::net::Ipv4Addr::BROADCAST
+                || network.peer.is_some_and(|peer| {
+                    let ip = peer.ip();
+                    network.listen.is_ipv4() != peer.is_ipv4()
+                        || peer.port() == 0
+                        || ip.is_unspecified()
+                        || ip.is_multicast()
+                        || ip == std::net::Ipv4Addr::BROADCAST
+                })
             {
                 return Err(ConfigError::NetworkAddress);
+            }
+            if network.discovery {
+                let ip = network.listen.ip();
+                if ip.is_unspecified() || ip.is_loopback() {
+                    return Err(ConfigError::DiscoveryAddress);
+                }
+            } else if network.peer.is_none() {
+                return Err(ConfigError::PeerAddressRequired);
             }
         }
         Ok(config)
@@ -148,6 +166,7 @@ peer_fingerprint = "fingerprint"
                 .network
                 .unwrap()
                 .peer
+                .unwrap()
                 .port(),
             24800
         );
@@ -160,6 +179,32 @@ peer_fingerprint = "fingerprint"
             assert!(matches!(
                 Config::parse(&settings.replace("192.168.1.10:24800", invalid)),
                 Err(ConfigError::NetworkAddress)
+            ));
+        }
+    }
+
+    #[test]
+    fn discovery_allows_omitting_the_manual_peer_on_a_specific_lan_address() {
+        let settings = r#"
+schema_version = 1
+[network]
+listen = "192.168.1.7:24800"
+discovery = true
+identity = "identity.bin"
+peer_certificate = "peer.der"
+peer_fingerprint = "fingerprint"
+"#;
+        let network = Config::parse(settings).unwrap().network.unwrap();
+        assert!(network.discovery);
+        assert!(network.peer.is_none());
+        assert!(matches!(
+            Config::parse(&settings.replace("discovery = true", "discovery = false")),
+            Err(ConfigError::PeerAddressRequired)
+        ));
+        for invalid in ["0.0.0.0:24800", "127.0.0.1:24800"] {
+            assert!(matches!(
+                Config::parse(&settings.replace("192.168.1.7:24800", invalid)),
+                Err(ConfigError::DiscoveryAddress)
             ));
         }
     }

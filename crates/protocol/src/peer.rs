@@ -2,5 +2,7 @@
 
 /// TLS negotiates this exact version before a connection is opened to the application.
 pub const ALPN: &[u8] = b"unikvm/1";
+pub const SERVICE_TYPE: &str = "_unikvm._udp.local.";
+pub const DISCOVERY_VERSION: &str = "1";
 /// Both endpoints send this fixed frame to confirm application acceptance.
 pub const READY: &[u8] = b"READY";

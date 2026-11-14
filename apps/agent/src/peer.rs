@@ -17,6 +17,12 @@ pub fn bind(config: &NetworkConfig) -> Result<PeerEndpoint> {
         )
     })?;
     let peer = TrustedPeer::read(file, config.peer_fingerprint.parse()?)?;
-    PeerEndpoint::bind(config.listen, config.peer, &identity, peer)
-        .context("start authenticated peer endpoint")
+    PeerEndpoint::bind(
+        config.listen,
+        config.peer,
+        config.discovery,
+        &identity,
+        peer,
+    )
+    .context("start authenticated peer endpoint")
 }
