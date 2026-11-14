@@ -1,5 +1,7 @@
 # Platform feasibility
 
+Local status IPC was verified natively on macOS 27.3 (arm64): all 16 workspace tests passed, including disconnect recovery and listener restart. Separate agent and CLI processes also passed status queries after abandoned client connections. This verifies local IPC only; macOS desktop input tests remain pending.
+
 Runtime verification was performed on Windows 11 Pro build 26300 in an ordinary desktop session. The other desktop rows summarize documented API paths. Availability depends on the installed desktop and granted session capabilities.
 
 | Desktop | Capture and suppression | Injection | Hotkeys and edge handling | Permissions and verification |

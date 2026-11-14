@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — macOS local IPC recovery
+
+- Fixed the Unix listener terminating when macOS reports `NotConnected` during peer credential lookup for a client that closed before accept. The listener discards the socket and continues; unverified streams are never served.
+- Updated the native transport regression to cover disconnects both before and after accept, followed by repeated successful status queries. Linux may authenticate the abandoned connection and observe EOF instead.
+- Native verification on macOS 27.3 (arm64): formatting, Clippy with warnings denied, all 16 workspace tests, and workspace build passed. Separate agent/CLI processes returned status after three clients connected and disconnected without requests.
+- Remaining limitations: macOS input probes and other desktop runtime validation remain pending. Next step remains the proposed Phase 2 networking task below.
+
 ## 2026-11-14 — Phase 0 and initial Phase 1
 
 - Recorded dependency decisions and a six-desktop feasibility matrix. Added a standalone Windows probe. Desktop access, hotkey registration, cursor placement at the monitor edge, and tagged keyboard and mouse injection, capture, and suppression passed.

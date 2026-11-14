@@ -113,7 +113,13 @@ impl Listener {
             let (stream, _) = self.socket.accept().await?;
             match verify_peer(&stream) {
                 Ok(()) => return Ok(self.stream.insert(stream)),
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+                // macOS can lose peer credentials when a queued client closes
+                // before accept. Discard it without exposing an unverified stream.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::NotConnected
+                    ) => {}
                 Err(error) => return Err(error),
             }
         }

@@ -18,14 +18,20 @@ async fn native_status_transport_retains_endpoint_and_recovers_after_abandoned_c
 
     timeout(Duration::from_secs(5), async {
         let endpoint = make_endpoint()?;
-        drop(endpoint.connect().await?);
-        let stream = listener.accept().await?;
+        let (client, stream) = tokio::join!(endpoint.connect(), listener.accept());
+        let stream = stream?;
+        drop(client?);
         assert!(
             respond(stream, || panic!("abandoned client sent no request"))
                 .await
                 .is_err()
         );
         listener.finish()?;
+
+        // Unix queues connections even if the client closes before accept. Peer
+        // credential lookup can then fail on macOS; the next live client must work.
+        #[cfg(unix)]
+        drop(endpoint.connect().await?);
 
         let expected = Status {
             pid: std::process::id(),
@@ -38,9 +44,18 @@ async fn native_status_transport_retains_endpoint_and_recovers_after_abandoned_c
                     query(&mut client).await
                 },
                 async {
-                    let stream = listener.accept().await?;
-                    respond(stream, || expected).await?;
-                    listener.finish()
+                    loop {
+                        let stream = listener.accept().await?;
+                        match respond(stream, || expected).await {
+                            Ok(()) => return listener.finish(),
+                            // Linux can authenticate the queued abandoned client;
+                            // macOS discards it during peer credential lookup.
+                            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                                listener.finish()?;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                 }
             );
             assert_eq!(received?, expected);
