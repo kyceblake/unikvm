@@ -1106,6 +1106,10 @@ dependencies = [
 [[package]]
 name = "unikvm-clipboard"
 version = "0.1.0"
+dependencies = [
+ "unikvm-core",
+ "unikvm-protocol",
+]
 
 [[package]]
 name = "unikvm-config"

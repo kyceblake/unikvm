@@ -31,6 +31,8 @@ Tokio's fixed buffers, timers and local transports cover the status path. On Win
 
 Use one crypto provider to limit the dependency and native build surface. The dependency license check now includes ISC and BSD-3-Clause for the reviewed crypto stack. Windows identity files use DPAPI through the existing Windows bindings. [Quinn endpoint](https://docs.rs/quinn/0.11.12/quinn/struct.Endpoint.html), [Rustls client certificate verifier](https://docs.rs/rustls/0.23.46/rustls/server/struct.WebPkiClientVerifier.html), [tempfile identity persistence primitive](https://docs.rs/tempfile/3.27.0/tempfile/struct.NamedTempFile.html#method.persist_noclobber), [Windows DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
 
+The Phase 4 clipboard frame uses the existing Tokio byte I/O. The native adapter decision remains open. Verify access to clipboard change counters and sensitive-content markers before choosing the adapter so sync can ignore existing and protected entries. macOS may prompt for programmatic pasteboard access. [Tokio byte I/O](https://docs.rs/tokio/1.54.1/tokio/io/trait.AsyncReadExt.html), [Windows clipboard formats](https://learn.microsoft.com/en-gb/windows/desktop/dataxchg/clipboard-formats), [Apple pasteboard change count](https://developer.apple.com/documentation/appkit/nspasteboard/changecount), [Apple pasteboard access](https://developer.apple.com/documentation/appkit/nspasteboard/accessbehavior-swift.enum)
+
 ## Adopted for mDNS discovery
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |

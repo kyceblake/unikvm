@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Phase 4 plain-text clipboard foundation
+
+- Kept the fixed two-display handoff for the first release. Moved monitor enumeration, layout synchronization, and the layout editor to Phase 7 after release. Clipboard, file transfers, and release hardening are now Phases 4 through 6.
+- Added a versioned plain-text update frame with a 64 KiB UTF-8 limit, authenticated-origin checks in the clipboard state, and per-session deduplication. Logical revisions break simultaneous-write ties by device ID.
+- Windows formatting, strict Clippy, workspace build, and 51 workspace tests passed. Apple Silicon and x86-64 Linux passed cross-target Clippy. Cargo deny passed with existing duplicate-version warnings.
+- Next, connect this format to a mutually opted-in clipboard stream and native Windows and macOS adapters. Baseline the current clipboard on connection without broadcasting it, skip entries marked sensitive by their source, and filter local notifications triggered by remote writes. Verify with bidirectional copy/paste on the paired desktops.
+
 ## 2026-11-15 — Opt-in locked Mac receiver and Windows feasibility probe
 
 - Added `input.allow_locked_receive` (default false) for a pinned receiving peer. Mac reception requires this user's logged-in console session; Secure Input is allowed only while that eligible session is normally locked. Protected local input is never forwarded. The monitor survives suspension and recreates its complete event tap after unlock.

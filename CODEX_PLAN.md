@@ -30,6 +30,8 @@ Work **incrementally**. Begin with a feasibility and repository foundation miles
    - Support mouse movement, buttons, wheel, keyboard press/release, modifiers, and practical key layout differences.
 
 3. **Display layout**
+   - The first release uses the existing fixed left/right handoff between two primary displays.
+   - Full monitor enumeration, shared layout, and the layout editor are post-release.
    - Enumerate each peer's physical monitors with stable identifiers where possible, logical size, scale, rotation, and position.
    - Configure a shared virtual desk layout through a **keyboard-driven TUI**.
    - Allow displays to be positioned with directional controls and optional snapping.
@@ -63,7 +65,7 @@ Work **incrementally**. Begin with a feasibility and repository foundation miles
 ### P1 — operational quality
 
 - A headless **user-session agent/daemon** independent of the TUI's lifetime.
-- TUI for peer status, pairing, layout editing, keybindings, permissions, and transfer status.
+- TUI for peer status, pairing, keybindings, permissions, and transfer status. The layout editor follows the first release.
 - Local IPC between TUI/CLI and daemon; secure it against other local users.
 - User-session autostart, diagnostics, structured logs, graceful shutdown/restart, and documented permission onboarding.
 - Windows/macOS/Linux build and test coverage.
@@ -220,38 +222,40 @@ The schema must be versioned and forward-compatible. All fields from untrusted p
 - Implement capture/suppression and injection for the first verified platforms.
 - Add focus request/grant/release, global shortcuts, physical-event filtering, synthetic held-key tracking, and emergency local recovery.
 - Start with two-device keyboard and mouse control, then multiple peers.
+- Ship the existing fixed left/right handoff between two primary displays. Keep transitions to adjacent local monitors on the native desktop.
 
 **Done when:** Two real machines share input bidirectionally without doubled input or stuck modifiers; killing either daemon recovers local input safely.
 
-### Phase 4 — seamless display layout
+### Phase 4 — clipboard
 
-- Enumerate monitors and synchronize virtual layout.
-- Implement normalized edge mapping, neighbor lookup, cursor transitions, and keyboard focus following the pointer.
-- Add an editable layout TUI with save/load and offline-display placeholders.
-
-**Done when:** Transition works across different-sized displays, and physical native multi-monitor transitions remain local.
-
-### Phase 5 — clipboard
-
-- Add text synchronization with origin/revision tracking and deterministic conflict resolution.
+- Define the bounded plain-text update format and deterministic conflict resolution.
+- Connect the Windows clipboard and the Mac pasteboard to an explicitly enabled peer link. Verify a real copy/paste in both directions.
 - Add HTML and images only after text passes loop and privacy tests.
 - Expose per-peer sync permissions and pause controls.
 
 **Done when:** Repeated bidirectional copy operations do not echo indefinitely or accidentally disclose clipboard content to untrusted peers.
 
-### Phase 6 — file offers and large transfers
+### Phase 5 — file offers and large transfers
 
 - Add metadata-only clipboard file offers, recipient confirmation, chunked streaming, staging, progress, cancellation, verification.
 - Test files larger than available RAM; then add resume support and native paste integration.
 
 **Done when:** Transfers are bounded-memory, recipient-approved, verified, and never expose partial files as completed files.
 
-### Phase 7 — hardening and releases
+### Phase 6 — hardening and first release
 
 - Cross-platform CI, automated tests, integration test harnesses, packaging, user-session autostart, onboarding, platform capability warnings, and threat-model review.
 - Performance instrumentation and optimization after functional correctness.
 
 **Done when:** Installation, pairing, normal use, and disconnection recovery are documented and reproducible on supported environments.
+
+### Phase 7 — monitor-aware layout after the first release
+
+- Enumerate local monitors and synchronize the virtual layout among approved peers.
+- Extend normalized edge mapping, neighbor lookup, cursor transitions, and keyboard focus to individual displays.
+- Add an editable layout TUI with save/load and offline-display placeholders.
+
+**Done when:** Cross-device transitions work across different-sized displays at configured edges, and physical native multi-monitor transitions remain local.
 
 ## Tests and quality gates
 
