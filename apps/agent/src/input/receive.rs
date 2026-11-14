@@ -7,8 +7,10 @@ use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
 use unikvm_core::input::InputEvent;
 use unikvm_network::identity::Fingerprint;
-use unikvm_platform::input::{InputSink, MotionPacer, Shortcut};
-use unikvm_protocol::input::{self, DENY, Frame, GRANT, HEARTBEAT_ACK, LEASE, REQUEST};
+use unikvm_platform::input::{EdgeLayout, InputSink, MotionPacer, Shortcut};
+use unikvm_protocol::input::{
+    self, DENY, EDGE_REQUEST, Frame, GRANT, HEARTBEAT_ACK, LEASE, REQUEST,
+};
 
 use super::Focus;
 
@@ -19,6 +21,7 @@ pub async fn run(
     mut connections: watch::Receiver<Option<quinn::Connection>>,
     peer: Fingerprint,
     state: &Cell<FocusState>,
+    edge: Option<EdgeLayout>,
 ) -> Result<()> {
     let mut session_id = 0u64;
     loop {
@@ -34,7 +37,7 @@ pub async fn run(
                 peer: peer.device_id(),
                 id: SessionId(session_id),
             };
-            let result = receive(&mut send, &mut recv, state, session, &mut signals).await;
+            let result = receive(&mut send, &mut recv, state, session, &mut signals, edge).await;
             let _ = send.finish();
             let _ = recv.stop(0u32.into());
             if let Err(error) = result {
@@ -63,14 +66,33 @@ async fn receive(
     state: &Cell<FocusState>,
     session: ControlSession,
     signals: &mut watch::Receiver<Shortcut>,
+    edge: Option<EdgeLayout>,
 ) -> Result<()> {
     let mut request = [0; REQUEST.len()];
-    timeout(ADMISSION_TIMEOUT, recv.read_exact(&mut request))
+    let admission = Instant::now() + ADMISSION_TIMEOUT;
+    timeout_at(admission, recv.read_exact(&mut request))
         .await
         .context("input request timed out")??;
-    if request != *REQUEST {
-        return Ok(());
-    }
+    let entry = match (&request, edge) {
+        (REQUEST, _) => None,
+        (EDGE_REQUEST, Some(edge)) => {
+            let mut entry = [0; 3];
+            timeout_at(admission, recv.read_exact(&mut entry))
+                .await
+                .context("edge request timed out")??;
+            match input::edge_entry(entry) {
+                Some((side, height)) if side == edge.side => Some((edge, height)),
+                _ => {
+                    deny(send).await;
+                    return Ok(());
+                }
+            }
+        }
+        _ => {
+            deny(send).await;
+            return Ok(());
+        }
+    };
     let Some(focus) = Focus::reserve(state, session, FocusEvent::AcceptIncoming(session)) else {
         deny(send).await;
         return Ok(());
@@ -90,17 +112,26 @@ async fn receive(
 
     let result = tokio::select! {
         biased;
-        local = wait_local(signals, baseline) => local.map(|()| true),
+        local = wait_local(signals, baseline) => local.map(|()| (true, None)),
         result = async {
             timeout(ADMISSION_TIMEOUT, send.write_all(&[GRANT]))
                 .await
                 .context("input grant timed out")??;
             info!("receiving peer input");
-            inject(&mut sink, send, recv).await
-        } => result.map(|()| false),
+            inject(&mut sink, send, recv, entry).await
+        } => result.map(|height| (false, height)),
     };
     sink.release_all().context("release synthetic input")?;
-    if result? {
+    let (local, height) = result?;
+    if let Some(height) = height {
+        timeout(
+            ADMISSION_TIMEOUT,
+            send.write_all(&input::edge_return(height)),
+        )
+        .await
+        .context("report return across display edge")??;
+        info!("peer input returned across the display edge");
+    } else if local {
         focus.transition(FocusEvent::LocalActivity);
         info!("physical input reclaimed local control");
     } else {
@@ -125,8 +156,13 @@ async fn inject(
     sink: &mut InputSink,
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
-) -> Result<()> {
+    entry: Option<(EdgeLayout, u16)>,
+) -> Result<Option<u16>> {
     let mut deadline = Instant::now() + LEASE;
+    // Wait for the first heartbeat before repositioning the cursor. The
+    // sender may cancel a request after the receiver grants it.
+    let mut pending_entry = entry;
+    let edge = entry.map(|(edge, _)| edge);
     let mut motion = match MotionPacer::new(sink) {
         Ok(motion) => {
             if let Some(period) = motion.display_period() {
@@ -153,8 +189,10 @@ async fn inject(
                     biased;
                     step = pacer.next() => {
                         let [dx, dy] = step.context("pace pointer movement")?;
-                        if dx != 0 || dy != 0 {
-                            sink.send(InputEvent::PointerMove { dx, dy })?;
+                        if (dx != 0 || dy != 0)
+                            && let Some(height) = move_pointer(sink, edge, dx, dy)?
+                        {
+                            return Ok(Some(height));
                         }
                         tokio::task::yield_now().await;
                     }
@@ -170,9 +208,13 @@ async fn inject(
                 if let Some(pacer) = &mut motion {
                     flush_motion(pacer, sink)?;
                 }
-                return Ok(());
+                return Ok(None);
             }
             Frame::Event(event) => {
+                ensure!(
+                    pending_entry.is_none(),
+                    "first heartbeat required before edge input"
+                );
                 if let Some(pacer) = &mut motion {
                     if let InputEvent::PointerMove { dx, dy } = event
                         && pacer.queue(dx, dy)
@@ -184,13 +226,25 @@ async fn inject(
                     // clicks, and drain it before falling back to immediate motion.
                     flush_motion(pacer, sink)?;
                 }
-                sink.send(event)?;
+                if let InputEvent::PointerMove { dx, dy } = event {
+                    if let Some(height) = move_pointer(sink, edge, dx, dy)? {
+                        return Ok(Some(height));
+                    }
+                } else {
+                    sink.send(event)?;
+                }
             }
             Frame::Heartbeat(token) => {
                 ensure!(
                     InputSink::has_permission(),
                     "local input posting became unavailable"
                 );
+                if let Some((edge, height)) = pending_entry.take() {
+                    sink.enter_edge(edge, height)?;
+                    if let Ok(next) = MotionPacer::new(sink) {
+                        motion = Some(next);
+                    }
+                }
                 timeout_at(deadline, send.write_all(&[HEARTBEAT_ACK + token]))
                     .await
                     .context("input acknowledgment timed out")??;
@@ -200,6 +254,21 @@ async fn inject(
         // Let the local-activity branch run even when the peer has buffered many frames.
         tokio::task::yield_now().await;
     }
+}
+
+fn move_pointer(
+    sink: &mut InputSink,
+    edge: Option<EdgeLayout>,
+    dx: i32,
+    dy: i32,
+) -> std::io::Result<Option<u16>> {
+    if let Some(edge) = edge
+        && let Some(height) = sink.exit_edge(edge, dx, dy)?
+    {
+        return Ok(Some(height));
+    }
+    sink.send(InputEvent::PointerMove { dx, dy })?;
+    Ok(None)
 }
 
 fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Result<()> {

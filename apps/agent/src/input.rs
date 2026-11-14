@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use tokio::sync::watch;
-use unikvm_config::{InputConfig, InputMode};
+use unikvm_config::{InputConfig, InputMode, PeerSide};
 use unikvm_network::{PeerEndpoint, identity::Fingerprint};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -12,6 +12,7 @@ pub struct Control {
     connections: watch::Receiver<Option<quinn::Connection>>,
     peer: Fingerprint,
     mode: InputMode,
+    side: Option<PeerSide>,
 }
 
 impl Control {
@@ -27,17 +28,33 @@ impl Control {
             connections,
             peer,
             mode: config.mode,
+            side: config.peer_side,
         })
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub async fn run(self) -> Result<()> {
         use tracing::info;
-        use unikvm_platform::input::Capture;
+        use unikvm_core::geometry::Edge;
+        use unikvm_platform::input::{Capture, EdgeLayout};
 
         let focus = Cell::new(FocusState::Local);
         let allow_send = self.mode != InputMode::Receive;
-        let mut capture = Capture::start(allow_send).context("start local input monitor")?;
+        let edge = self
+            .side
+            .map(|side| {
+                EdgeLayout::primary(match side {
+                    PeerSide::Left => Edge::Left,
+                    PeerSide::Right => Edge::Right,
+                })
+            })
+            .transpose()
+            .context("read primary display for edge switching")?;
+        let mut capture =
+            Capture::with_edge(allow_send, edge).context("start local input monitor")?;
+        if let Some(edge) = edge {
+            info!(side = ?edge.side, "primary display edge switching enabled");
+        }
         if allow_send {
             info!(
                 "input ready: Ctrl+Shift+F9 sends to the peer and Ctrl+Shift+F10 returns locally"
@@ -46,21 +63,24 @@ impl Control {
             info!("ready to receive peer input");
         }
         match self.mode {
-            InputMode::Send => send::run(&mut capture, self.connections, self.peer, &focus).await,
+            InputMode::Send => {
+                send::run(&mut capture, self.connections, self.peer, &focus, None).await
+            }
             InputMode::Receive => {
                 receive::run(
                     capture.shortcuts.clone(),
                     self.connections,
                     self.peer,
                     &focus,
+                    None,
                 )
                 .await
             }
             InputMode::Bidirectional => {
                 let signals = capture.shortcuts.clone();
                 tokio::select! {
-                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus) => result,
-                    result = receive::run(signals, self.connections, self.peer, &focus) => result,
+                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, edge.map(|edge| edge.side)) => result,
+                    result = receive::run(signals, self.connections, self.peer, &focus, edge) => result,
                 }
             }
         }
@@ -68,7 +88,7 @@ impl Control {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub async fn run(self) -> Result<()> {
-        let _ = (self.connections, self.peer, self.mode);
+        let _ = (self.connections, self.peer, self.mode, self.side);
         bail!("input sharing is available on Windows and macOS")
     }
 }

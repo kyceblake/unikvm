@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-14 — Phase 4 fixed display edge
+
+- Accepted the two-machine input MVP and added opt-in horizontal edge switching for the primary displays of a pinned bidirectional pair. Opposite `peer_side` settings are required. Crossing carries a normalized pointer height, and crossing back returns the original sender's keyboard and pointer locally.
+- Windows workspace build, tests, strict Clippy, and desktop probes passed, including native pointer placement without false takeover. Apple Silicon and x86-64 Linux passed cross-target strict Clippy.
+- Next, verify both crossings and the emergency shortcut on the paired desktops. The first slice uses one fixed pair of primary displays and requires an agent restart after changing the primary displays. Monitor selection, layout synchronization, and the editor remain open.
+
 ## 2026-11-14 — Japanese IME takeover on Windows
 
 - Two Mac-to-Windows tests reproduced a false local takeover when Cmd+Space selected Japanese. Both traces showed an untagged key release at the input-language switch, and the authenticated peer connection stayed up.

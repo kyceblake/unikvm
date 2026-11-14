@@ -3,6 +3,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
+use super::EdgeLayout;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField, KeyCode,
@@ -12,6 +13,7 @@ use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
 use core_graphics::sys::CGEventSourceRef;
 use foreign_types::ForeignType;
+use unikvm_core::geometry::Point;
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 pub(super) const EVENT_TAG: i64 = 0x55_4e_49_4b_56_4d;
@@ -42,6 +44,28 @@ pub struct MacInputSink {
 }
 
 impl MacInputSink {
+    pub fn enter_edge(&mut self, edge: EdgeLayout, height: u16) -> io::Result<()> {
+        let point = edge.place(height)?;
+        self.display = CGDisplay::main();
+        self.bounds = self.display.bounds();
+        self.pointer = CGPoint::new(f64::from(point.x), f64::from(point.y));
+        Ok(())
+    }
+
+    pub fn exit_edge(&self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
+        if self.keys.contains(&true) || self.buttons.contains(&true) {
+            return Ok(None);
+        }
+        Ok(edge.crossing(
+            Point {
+                x: self.pointer.x.floor() as i32,
+                y: self.pointer.y.floor() as i32,
+            },
+            dx,
+            dy,
+        ))
+    }
+
     /// Queries the current process's permission without showing a prompt.
     pub fn has_permission() -> bool {
         // SAFETY: This queries the WindowServer's posting permission for the current process.

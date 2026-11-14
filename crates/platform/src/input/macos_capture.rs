@@ -24,9 +24,14 @@ use core_graphics::geometry::CGPoint;
 use core_graphics::sys::CGEventRef;
 use foreign_types::ForeignType;
 use tokio::sync::{mpsc, watch};
+use unikvm_core::geometry::Point;
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
-use super::capture::{ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state};
+use super::EdgeLayout;
+use super::capture::{
+    ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state, request_start,
+};
+use super::edge::EdgeTrigger;
 use super::macos::{EVENT_TAG, MacInputSink, key_code};
 use super::macos_cursor::BackgroundCursor;
 
@@ -93,6 +98,7 @@ struct TapState {
     arm_until: Instant,
     motion: PhysicalMotion,
     motion_remainder: [f64; 2],
+    edge: Option<EdgeTrigger>,
     scroll_remainder: [f64; 2],
 }
 
@@ -103,6 +109,7 @@ pub(super) fn run_tap(
     stop: Arc<AtomicBool>,
     initialized: &std::sync::mpsc::SyncSender<io::Result<()>>,
     allow_send: bool,
+    edge: Option<EdgeLayout>,
 ) -> io::Result<()> {
     if !MacInputSink::has_permission() {
         return Err(tap_permission());
@@ -121,6 +128,7 @@ pub(super) fn run_tap(
         arm_until: Instant::now(),
         motion: PhysicalMotion::default(),
         motion_remainder: [0.0; 2],
+        edge: edge.map(EdgeTrigger::new),
         scroll_remainder: [0.0; 2],
     });
     let mask = EVENT_TYPES
@@ -233,17 +241,21 @@ unsafe extern "C" fn tap_callback(
 impl TapState {
     fn update(&mut self, command: Command) {
         match command {
-            Command::Local => self.local(),
+            Command::Local { return_height } => self.return_locally(return_height),
             Command::Remote {
                 generation,
                 expires,
+                edge,
             } if self.stopped_generation != Some(generation) => {
                 let now = Instant::now();
                 if self.generation != Some(generation) {
                     self.generation = Some(generation);
                     self.arm_until = now + ARM_DELAY;
                 }
-                if now >= expires || (self.cursor.is_none() && now >= self.arm_until) {
+                if (edge && self.edge.is_none())
+                    || now >= expires
+                    || (self.cursor.is_none() && now >= self.arm_until)
+                {
                     self.emergency();
                 } else if self.cursor.is_none() && !physical_input_held() {
                     match CapturedCursor::new() {
@@ -283,6 +295,14 @@ impl TapState {
         self.scroll_remainder = [0.0; 2];
     }
 
+    fn return_locally(&mut self, height: Option<u16>) {
+        let was_sending = self.cursor.is_some();
+        self.local();
+        if was_sending && let (Some(height), Some(edge)) = (height, &self.edge) {
+            let _ = edge.layout.place(height);
+        }
+    }
+
     fn enqueue(&mut self, event: InputEvent) -> bool {
         if self.events.try_send(event).is_err() {
             self.emergency();
@@ -293,8 +313,9 @@ impl TapState {
 
     fn capture(&mut self, event: &CGEvent) -> bool {
         use CGEventType::*;
-        if matches!(*self.commands.borrow(), Command::Local) {
-            self.local();
+        let command = *self.commands.borrow();
+        if let Command::Local { return_height } = command {
+            self.return_locally(return_height);
         }
         let kind = event.get_type();
         match kind {
@@ -324,6 +345,25 @@ impl TapState {
                         || self.enqueue(InputEvent::PointerMove { dx, dy });
                 }
                 let [dx, dy] = delta.map(|axis| axis.round() as i32);
+                if matches!(kind, MouseMoved)
+                    && let Some(edge) = &mut self.edge
+                {
+                    let location = event.location();
+                    let point = Point {
+                        x: location.x.floor() as i32,
+                        y: location.y.floor() as i32,
+                    };
+                    let modifiers = CGEventFlags::CGEventFlagControl
+                        | CGEventFlags::CGEventFlagShift
+                        | CGEventFlags::CGEventFlagAlternate
+                        | CGEventFlags::CGEventFlagCommand;
+                    if !event.get_flags().intersects(modifiers)
+                        && let Some(height) = edge.attempt(point, dx, 0)
+                        && !physical_input_held()
+                    {
+                        request_start(&self.shortcuts, Some(height));
+                    }
+                }
                 if self.motion.update(dx, dy, Instant::now()) {
                     activity(&self.shortcuts);
                 }
@@ -361,10 +401,7 @@ impl TapState {
                 if code == KeyCode::F10 {
                     self.emergency();
                 } else if self.cursor.is_none() {
-                    self.shortcuts.send_modify(|signal| {
-                        signal.start = signal.start.wrapping_add(1);
-                        signal.cancelled = false;
-                    });
+                    request_start(&self.shortcuts, None);
                 }
                 return true;
             }

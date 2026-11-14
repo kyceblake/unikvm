@@ -2,6 +2,7 @@
 
 use std::io;
 
+use super::EdgeLayout;
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
@@ -28,6 +29,18 @@ pub struct WindowsInputSink {
 }
 
 impl WindowsInputSink {
+    pub fn enter_edge(&mut self, edge: EdgeLayout, height: u16) -> io::Result<()> {
+        edge.place(height)?;
+        Ok(())
+    }
+
+    pub fn exit_edge(&self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
+        if self.keys.contains(&true) || self.buttons.contains(&true) {
+            return Ok(None);
+        }
+        Ok(edge.crossing(super::windows_edge::position()?, dx, dy))
+    }
+
     pub(super) fn pointer_display(&self) -> super::windows_motion::PointerDisplay {
         super::windows_motion::PointerDisplay::default()
     }

@@ -2,13 +2,15 @@ use std::{cell::Cell, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout};
+use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout, timeout_at};
 use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
+use unikvm_core::geometry::Edge;
 use unikvm_network::identity::Fingerprint;
 use unikvm_platform::input::{Capture, Shortcut};
 use unikvm_protocol::input::{
-    self, Frame, GRANT, HEARTBEAT_ACK, HEARTBEAT_INTERVAL, HEARTBEAT_TOKENS, LEASE, REQUEST,
+    self, EDGE_RETURN, Frame, GRANT, HEARTBEAT_ACK, HEARTBEAT_INTERVAL, HEARTBEAT_TOKENS, LEASE,
+    REQUEST,
 };
 
 use super::Focus;
@@ -20,6 +22,7 @@ pub async fn run(
     connections: watch::Receiver<Option<quinn::Connection>>,
     peer: Fingerprint,
     state: &Cell<FocusState>,
+    side: Option<Edge>,
 ) -> Result<()> {
     let mut requested = 0;
 
@@ -32,11 +35,13 @@ pub async fn run(
         if shortcut.cancelled {
             continue;
         }
-        // Snapshot the selected connection. Reconnects always require a new shortcut.
+        // Snapshot the connection. A reconnect requires a fresh shortcut or edge crossing.
         let connection = connections.borrow().clone();
         let Some(connection) = connection.filter(|connection| connection.close_reason().is_none())
         else {
-            warn!("input peer is offline");
+            if shortcut.edge_height.is_none() {
+                warn!("input peer is offline");
+            }
             continue;
         };
         while capture.events.try_recv().is_ok() {}
@@ -47,8 +52,11 @@ pub async fn run(
         let Some(focus) = Focus::reserve(state, session, FocusEvent::Request(session)) else {
             continue;
         };
-        let result = control(capture, connection, &focus, session, shortcut.stop).await;
-        capture.local();
+        let result = control(capture, connection, &focus, session, shortcut, side).await;
+        match result.as_ref() {
+            Ok(Some(height)) => capture.return_from_edge(*height),
+            _ => capture.local(),
+        }
         drop(focus);
         requested = capture.shortcuts.borrow_and_update().start;
         if let Err(error) = result {
@@ -63,14 +71,19 @@ async fn control(
     connection: quinn::Connection,
     focus: &Focus<'_>,
     session: ControlSession,
-    stop: u64,
-) -> Result<()> {
+    shortcut: Shortcut,
+    side: Option<Edge>,
+) -> Result<Option<u16>> {
     let (mut send, mut recv) = tokio::select! {
         biased;
-        () = wait_stop(&mut capture.shortcuts, stop) => return Ok(()),
+        () = wait_stop(&mut capture.shortcuts, shortcut.stop) => return Ok(None),
         setup = timeout(LEASE, async {
             let (mut send, mut recv) = connection.open_bi().await?;
-            send.write_all(REQUEST).await?;
+            if let Some((side, height)) = side.zip(shortcut.edge_height) {
+                send.write_all(&input::edge_packet(side, height)).await?;
+            } else {
+                send.write_all(REQUEST).await?;
+            }
             let mut reply = [0];
             recv.read_exact(&mut reply).await?;
             ensure!(reply[0] == GRANT, "peer did not grant this input session");
@@ -81,7 +94,13 @@ async fn control(
         focus.transition(FocusEvent::Grant(session)) == FocusState::Sending(session),
         "input grant no longer matches"
     );
-    let result = active(capture, &mut send, &mut recv, session.id.0, stop).await;
+    let result = active(capture, &mut send, &mut recv, session.id.0, shortcut).await;
+    if let Ok(Some(_)) = result {
+        let _ = send.finish();
+        let _ = recv.stop(0u32.into());
+        info!("input returned across the display edge");
+        return result;
+    }
     capture.local();
     // A failed timed write may have left an incomplete frame. Reset the stream in that case.
     if result.is_ok() {
@@ -110,8 +129,9 @@ async fn active(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     generation: u64,
-    stop: u64,
-) -> Result<()> {
+    shortcut: Shortcut,
+) -> Result<Option<u16>> {
+    let stop = shortcut.stop;
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let deadline = sleep_until(Instant::now() + LEASE);
@@ -125,11 +145,20 @@ async fn active(
         let frame = tokio::select! {
             biased;
             () = wait_stop(&mut capture.shortcuts, stop) => {
-                return Ok(());
+                return Ok(None);
             }
             () = &mut deadline => anyhow::bail!("peer input lease expired"),
             reply = recv.read(&mut ack) => {
-                let Some(1) = reply? else { return Ok(()); };
+                let Some(1) = reply? else { return Ok(None); };
+                if ack[0] == EDGE_RETURN && shortcut.edge_height.is_some() {
+                    let mut height = [0; 2];
+                    tokio::select! {
+                        biased;
+                        () = wait_stop(&mut capture.shortcuts, stop) => return Ok(None),
+                        result = timeout_at(deadline.deadline(), recv.read_exact(&mut height)) => result.context("read edge return height")??,
+                    }
+                    return Ok(Some(u16::from_be_bytes(height)));
+                }
                 ensure!((HEARTBEAT_ACK..HEARTBEAT_ACK + HEARTBEAT_TOKENS).contains(&ack[0]), "invalid input acknowledgment");
                 let sent = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected peer input acknowledgment")?;
                 let expires = sent + LEASE;
@@ -137,7 +166,7 @@ async fn active(
                 if expires > deadline.deadline() {
                     deadline.as_mut().reset(expires);
                 }
-                capture.renew(generation, expires.into_std());
+                capture.renew_session(generation, expires.into_std(), shortcut.edge_height.is_some());
                 if !started {
                     info!("sending input to peer");
                     started = true;

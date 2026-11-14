@@ -18,6 +18,16 @@ Restart each agent from a terminal on the logged-in desktop.
 cargo run --locked -p unikvm-agent -- --config local-pairing/agent.toml
 ```
 
+## Switch at the display edge
+
+For a Mac immediately to the left of the PC, add `peer_side = "left"` to the Windows `[input]` table and `peer_side = "right"` to the Mac table. Both agents need bidirectional mode and a build with edge switching. Restart them after editing.
+
+Move the PC mouse to the left edge of the primary Windows display. The pointer should appear near the Mac's right edge at the matching relative height. Move back through that edge with the same mouse to return. For the reverse test, move the Mac trackpad cursor to the Mac's right edge, then use that trackpad to cross back from the left edge of Windows. Release any held keys and buttons before crossing. Ctrl+Shift+F9 starts shortcut-based sharing and Ctrl+Shift+F10 ends either type of session.
+
+The fixed layout uses the primary displays and reserves edges occupied by local monitors for the native desktop. Restart the agents after changing the primary displays. The Windows sender parks its cursor on its primary display while forwarding an edge session. Use one blank editor on each machine to verify pointer and keyboard focus. Monitor selection and synchronized layouts remain future work.
+
+## Test input sharing
+
 1. Wait for `authenticated peer connected` on both agents. Focus a blank editor on the Mac.
 2. Press **Ctrl+Shift+F9** on Windows and release the chord. Type a few characters and move, click, and scroll the pointer. The Mac should receive the input. On Mac keyboards with media actions on the top row, hold **Fn** as well to send F9 or F10.
 3. Use the **Mac's physical keyboard or trackpad** while Windows is sending. A key, click, scroll, or several pixels of movement gives the Mac back local control and ends forwarding from Windows. Try typing in the Mac editor while Windows moves its mouse. Both devices should now respond to their own hardware.

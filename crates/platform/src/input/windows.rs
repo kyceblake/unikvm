@@ -31,7 +31,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
-use super::capture::{ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state};
+use super::EdgeLayout;
+use super::capture::{
+    ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state, request_start,
+};
+use super::edge::EdgeTrigger;
+use unikvm_core::geometry::Point;
 
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
 
@@ -50,11 +55,14 @@ struct HookState {
     swallowed_keys: [bool; 256],
     swallowed_buttons: [bool; 5],
     anchor: POINT,
+    parked_from: Option<Point>,
     stopped_generation: Option<u64>,
     generation: Option<u64>,
     arm_until: Instant,
     last_pointer: POINT,
     motion: PhysicalMotion,
+    edge: Option<EdgeTrigger>,
+    pointer_buttons: [bool; 5],
 }
 
 pub(super) fn run_hooks(
@@ -64,6 +72,7 @@ pub(super) fn run_hooks(
     stop: Arc<AtomicBool>,
     initialized: &std::sync::mpsc::SyncSender<io::Result<()>>,
     allow_send: bool,
+    edge: Option<EdgeLayout>,
 ) -> io::Result<()> {
     // SAFETY: This dedicated hook thread owns its DPI context.
     if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.is_null()
@@ -88,11 +97,14 @@ pub(super) fn run_hooks(
             swallowed_keys: [false; 256],
             swallowed_buttons: [false; 5],
             anchor: POINT::default(),
+            parked_from: None,
             stopped_generation: None,
             generation: None,
             arm_until: Instant::now(),
             last_pointer,
             motion: PhysicalMotion::default(),
+            edge: edge.map(EdgeTrigger::new),
+            pointer_buttons: [false; 5],
         });
     });
     let _keyboard = Hook::install(WH_KEYBOARD_LL, keyboard_hook)?;
@@ -125,6 +137,7 @@ pub(super) fn run_hooks(
                 Command::Remote {
                     generation,
                     expires,
+                    edge,
                 } if state.stopped_generation != Some(generation) => {
                     if state.generation != Some(generation) {
                         state.generation = Some(generation);
@@ -138,12 +151,14 @@ pub(super) fn run_hooks(
                             || unsafe { GetCursorPos(&mut state.anchor) } == 0
                         {
                             state.emergency();
-                        } else {
+                        } else if !edge || state.park_for_capture() {
                             state.remote = true;
+                        } else {
+                            state.emergency();
                         }
                     }
                 }
-                Command::Local => state.remote = false,
+                Command::Local { return_height } => state.local(return_height),
                 Command::Remote { .. } => {}
             }
         });
@@ -170,12 +185,17 @@ pub(super) fn run_hooks(
             return Err(io::Error::last_os_error());
         }
     }
+    HOOK_STATE.with(|state| {
+        if let Some(state) = state.borrow_mut().as_mut() {
+            state.local(None);
+        }
+    });
     Ok(())
 }
 
 impl HookState {
     fn emergency(&mut self) {
-        self.remote = false;
+        self.local(None);
         self.stopped_generation = self.generation;
         self.shortcuts.send_modify(|signal| {
             signal.stop = signal.stop.wrapping_add(1);
@@ -216,10 +236,7 @@ impl HookState {
                 if vk == VK_F10 {
                     self.emergency();
                 } else if !self.remote {
-                    self.shortcuts.send_modify(|signal| {
-                        signal.start = signal.start.wrapping_add(1);
-                        signal.cancelled = false;
-                    });
+                    request_start(&self.shortcuts, None);
                 }
                 return true;
             }
@@ -278,6 +295,22 @@ impl HookState {
                 .clamp(-32768, 32768);
             return (dx == 0 && dy == 0) || self.enqueue(InputEvent::PointerMove { dx, dy });
         }
+        if message == WM_MOUSEMOVE
+            && !self.down.contains(&true)
+            && !self.pointer_buttons.contains(&true)
+            && let Some(edge) = &mut self.edge
+            && let Some(height) = edge.attempt(
+                Point {
+                    x: previous.x,
+                    y: previous.y,
+                },
+                event.pt.x.saturating_sub(previous.x),
+                event.pt.y.saturating_sub(previous.y),
+            )
+            && !physical_input_held()
+        {
+            request_start(&self.shortcuts, Some(height));
+        }
         let mouse_data = (event.mouseData >> 16) as u16;
         let mapped = match message {
             WM_LBUTTONDOWN | WM_LBUTTONUP => {
@@ -298,6 +331,7 @@ impl HookState {
             _ => None,
         };
         if let Some((button, index, pressed)) = mapped {
+            self.pointer_buttons[index] = pressed;
             if self.remote
                 && self.enqueue(InputEvent::PointerButton {
                     button,
@@ -325,9 +359,48 @@ impl HookState {
     }
 
     fn check_capture_command(&mut self) {
-        if matches!(*self.commands.borrow(), Command::Local) {
-            self.remote = false;
+        let command = *self.commands.borrow();
+        if let Command::Local { return_height } = command {
+            self.local(return_height);
         }
+    }
+
+    fn local(&mut self, return_height: Option<u16>) {
+        self.remote = false;
+        let Some(saved) = self.parked_from.take() else {
+            return;
+        };
+        let returned = return_height
+            .zip(self.edge.as_ref())
+            .and_then(|(height, edge)| edge.layout.place(height).ok());
+        if let Some(point) =
+            returned.or_else(|| super::windows_edge::place(saved).ok().map(|()| saved))
+        {
+            self.last_pointer = POINT {
+                x: point.x,
+                y: point.y,
+            };
+        }
+    }
+
+    fn park_for_capture(&mut self) -> bool {
+        let Some(edge) = &self.edge else {
+            return false;
+        };
+        let saved = Point {
+            x: self.anchor.x,
+            y: self.anchor.y,
+        };
+        let Ok(point) = edge.layout.park() else {
+            return false;
+        };
+        self.parked_from = Some(saved);
+        self.anchor = POINT {
+            x: point.x,
+            y: point.y,
+        };
+        self.last_pointer = self.anchor;
+        true
     }
 }
 
@@ -493,7 +566,10 @@ mod tests {
         events: mpsc::Sender<InputEvent>,
     ) -> HookState {
         HookState {
-            commands: watch::channel(Command::Local).1,
+            commands: watch::channel(Command::Local {
+                return_height: None,
+            })
+            .1,
             shortcuts,
             events,
             remote: false,
@@ -503,11 +579,14 @@ mod tests {
             swallowed_keys: [false; 256],
             swallowed_buttons: [false; 5],
             anchor: POINT::default(),
+            parked_from: None,
             stopped_generation: None,
             generation: None,
             arm_until: Instant::now(),
             last_pointer: POINT::default(),
             motion: PhysicalMotion::default(),
+            edge: None,
+            pointer_buttons: [false; 5],
         }
     }
 

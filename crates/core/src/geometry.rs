@@ -82,6 +82,44 @@ impl DisplayRect {
         Some(side.point(target.pixel, target.start + offset as i64))
     }
 
+    /// Normalized height of an outward motion that reaches a horizontal exit.
+    pub fn horizontal_crossing(self, side: Edge, point: Point, dx: i32, dy: i32) -> Option<u16> {
+        if !self.contains(point) {
+            return None;
+        }
+        let edge = self.bounds(side);
+        let x = i64::from(point.x) + i64::from(dx);
+        match side {
+            Edge::Left if dx < 0 && x <= edge.pixel => {}
+            Edge::Right if dx > 0 && x >= edge.pixel => {}
+            _ => return None,
+        }
+        let y = (i64::from(point.y) + i64::from(dy)).clamp(edge.start, edge.end - 1);
+        let span = edge.end - edge.start - 1;
+        Some(
+            ((y - edge.start) * i64::from(u16::MAX) + span / 2)
+                .checked_div(span)
+                .unwrap_or(32768) as u16,
+        )
+    }
+
+    pub fn horizontal_entry(self, side: Edge, height: u16, inset: u32) -> Point {
+        let height_span = i64::from(self.height.get() - 1);
+        let y = i64::from(self.origin.y)
+            + (height_span * i64::from(height) + i64::from(u16::MAX) / 2) / i64::from(u16::MAX);
+        let x = match side {
+            Edge::Left => {
+                i64::from(self.origin.x) + i64::from(inset.min((self.width.get() - 1) / 2))
+            }
+            Edge::Right => self.right() - 1 - i64::from(inset.min((self.width.get() - 1) / 2)),
+            _ => unreachable!("horizontal entry requires a left or right edge"),
+        };
+        Point {
+            x: x as i32,
+            y: y as i32,
+        }
+    }
+
     fn right(self) -> i64 {
         i64::from(self.origin.x) + i64::from(self.width.get())
     }
@@ -265,5 +303,30 @@ mod tests {
             y: 0,
         };
         assert_eq!(wide.map_edge(Edge::Bottom, exit, wide), Some(exit));
+    }
+
+    #[test]
+    fn horizontal_handoff_preserves_proportional_height_on_different_displays() {
+        let windows = rect(0, 0, 2560, 1441);
+        let mac = rect(-1200, -250, 1200, 801);
+        let height = windows
+            .horizontal_crossing(Edge::Left, Point { x: 5, y: 700 }, -5, 20)
+            .unwrap();
+        assert_eq!(
+            mac.horizontal_entry(Edge::Right, height, 16),
+            Point { x: -17, y: 150 }
+        );
+        assert_eq!(
+            windows.horizontal_crossing(Edge::Left, Point { x: 0, y: 720 }, 1, 0),
+            None
+        );
+        assert_eq!(
+            windows.horizontal_crossing(Edge::Left, Point { x: 0, y: 720 }, 0, 10),
+            None
+        );
+        assert_eq!(
+            windows.horizontal_crossing(Edge::Left, Point { x: -1, y: 720 }, -2, 0),
+            None
+        );
     }
 }

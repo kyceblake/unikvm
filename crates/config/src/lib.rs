@@ -36,6 +36,14 @@ pub struct Config {
 pub struct InputConfig {
     pub mode: InputMode,
     pub peer_fingerprint: String,
+    pub peer_side: Option<PeerSide>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerSide {
+    Left,
+    Right,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -104,6 +112,8 @@ pub enum ConfigError {
     DiscoveryAddress,
     #[error("input.peer_fingerprint must identify a peer already trusted in [network]")]
     InputPeer,
+    #[error("input.peer_side requires bidirectional input mode")]
+    InputLayout,
 }
 
 impl Config {
@@ -123,6 +133,11 @@ impl Config {
         let mut config: Self = toml::from_str(source)?;
         if config.schema_version != SCHEMA_VERSION {
             return Err(ConfigError::Version(config.schema_version));
+        }
+        if config.input.as_ref().is_some_and(|input| {
+            input.peer_side.is_some() && input.mode != InputMode::Bidirectional
+        }) {
+            return Err(ConfigError::InputLayout);
         }
         if let Some(network) = &mut config.network {
             match (
@@ -223,6 +238,20 @@ mod tests {
         assert!(matches!(
             Config::parse(&format!("{base}{network}{}", input.replace("'ab'", "'cd'"))),
             Err(ConfigError::InputPeer)
+        ));
+        let edge = "\npeer_side = 'left'";
+        assert_eq!(
+            Config::parse(&format!("{base}{network}{input}{edge}"))
+                .unwrap()
+                .input
+                .unwrap()
+                .peer_side,
+            Some(super::PeerSide::Left)
+        );
+        let receive = input.replace("'bidirectional'", "'receive'");
+        assert!(matches!(
+            Config::parse(&format!("{base}{network}{receive}{edge}")),
+            Err(ConfigError::InputLayout)
         ));
     }
 

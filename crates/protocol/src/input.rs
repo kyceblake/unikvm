@@ -4,15 +4,45 @@ use std::io;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use unikvm_core::geometry::Edge;
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 pub const REQUEST: &[u8; 8] = b"INPUT/1\n";
+pub const EDGE_REQUEST: &[u8; 8] = b"EDGE/1\r\n";
 pub const GRANT: u8 = 1;
 pub const DENY: u8 = 0;
 pub const HEARTBEAT_ACK: u8 = 2;
 pub const HEARTBEAT_TOKENS: u8 = 250;
+pub const EDGE_RETURN: u8 = HEARTBEAT_ACK + HEARTBEAT_TOKENS;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 pub const LEASE: Duration = Duration::from_millis(1250);
+
+/// First request bytes are always eight bytes so older peers can reject edge mode.
+pub fn edge_packet(side: Edge, height: u16) -> [u8; 11] {
+    let mut packet = [0; 11];
+    packet[..8].copy_from_slice(EDGE_REQUEST);
+    packet[8] = match side {
+        Edge::Left => 0,
+        Edge::Right => 1,
+        _ => unreachable!("edge sessions require a horizontal exit"),
+    };
+    packet[9..].copy_from_slice(&height.to_be_bytes());
+    packet
+}
+
+pub fn edge_entry([side, hi, lo]: [u8; 3]) -> Option<(Edge, u16)> {
+    let entry = match side {
+        0 => Edge::Right,
+        1 => Edge::Left,
+        _ => return None,
+    };
+    Some((entry, u16::from_be_bytes([hi, lo])))
+}
+
+pub fn edge_return(height: u16) -> [u8; 3] {
+    let [hi, lo] = height.to_be_bytes();
+    [EDGE_RETURN, hi, lo]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame {
@@ -162,4 +192,16 @@ mod tests {
             );
         }
     }
+}
+#[test]
+fn edge_request_requires_an_opposite_horizontal_side_and_preserves_height() {
+    let request = edge_packet(Edge::Left, 0x1234);
+    assert_eq!(&request[..8], EDGE_REQUEST);
+    assert_eq!(
+        edge_entry(request[8..].try_into().unwrap()),
+        Some((Edge::Right, 0x1234))
+    );
+    assert_eq!(edge_entry([1, 0, 0]), Some((Edge::Left, 0)));
+    assert_eq!(edge_entry([2, 0, 0]), None);
+    assert_eq!(edge_return(0x1234), [EDGE_RETURN, 0x12, 0x34]);
 }
