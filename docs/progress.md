@@ -1,11 +1,18 @@
 # Progress
 
+## 2026-11-14 — Telegram Copy Media compatibility
+
+- Telegram for macOS puts an image item alongside a file reference. The Mac adapter now checks for explicit image data before excluding file-reference copies. It never opens the referenced file and still skips pasteboard privacy markers. [Telegram's Copy Media implementation](https://github.com/TelegramMessenger/telegram-macos/blob/246e3e957ae5cea1ecff6d7a6a6db3e47be69bb5/packages/ChatUI/Sources/ChatUI/ChatMessageMenuItems.swift#L312-L317)
+- Added private pasteboard regressions for a file reference with an image item and a standalone Finder-style file reference. Next, build on the Mac, copy an ordinary photo from Telegram, and confirm it pastes in Paint. Finder copy/paste of the original JPEG remains part of Phase 5.
+- Windows formatting, strict Clippy, workspace build, and all 58 standard tests passed. Windows denied access when starting the Apple Silicon cross-check of two dependencies, so the Mac regressions still need a native run.
+
 ## 2026-11-14 — Mac image copy compatibility
 
 - The operator confirmed Windows-to-Mac image paste. Windows logged outbound images and an active clipboard v3 session, with no incoming image during the Mac-to-Windows attempts.
 - The Mac adapter now looks for supported raster data across a bounded number of pasteboard items, even when an image has accompanying text or browser metadata. It also reads JPEG representations. File copies and privacy markers remain excluded.
 - Windows formatting, strict Clippy, all 58 workspace tests, and the build passed on rerun after a transient three-peer test failure. Cargo deny passed. The Apple Silicon cross-check is still blocked by Windows access-denied errors starting the compiler.
-- Next, update the Mac agent and repeat Mac-to-Windows paste in Paint. The private Mac pasteboard regression covers an image with a caption and an auxiliary item.
+- After updating the Mac agent, the operator confirmed that both a Mac screenshot and Discord's Copy Image command pasted into Paint. Windows logged both images as received and applied. Discord image copy from Windows to Mac also worked.
+- Copying a JPEG file in Finder or Explorer requires Phase 5 file transfer. Open the JPEG in an app and copy the image itself to use clipboard image sync.
 
 ## 2026-11-14 — Phase 4 image clipboard sync
 
