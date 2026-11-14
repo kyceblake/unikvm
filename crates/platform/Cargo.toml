@@ -17,7 +17,7 @@ zeroize.workspace = true
 core-foundation.workspace = true
 core-graphics.workspace = true
 foreign-types.workspace = true
-image = { workspace = true, features = ["png", "tiff"] }
+image = { workspace = true, features = ["jpeg", "png", "tiff"] }
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
 objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSData", "NSString"] }

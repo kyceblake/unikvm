@@ -147,6 +147,9 @@ mod sync {
                 timeout(UPDATE_TIMEOUT, clipboard::write(&mut send, &update))
                     .await
                     .context("clipboard update write timed out")??;
+                if matches!(update.content(), Content::Png(_)) {
+                    debug!("sent clipboard image");
+                }
             }
         }
         Ok(())
@@ -189,6 +192,9 @@ mod sync {
                             .as_ref()
                             .is_none_or(|old| update.revision() > old.revision())
                     {
+                        if matches!(update.content(), Content::Png(_)) {
+                            debug!("received clipboard image");
+                        }
                         pending = Some(update);
                     }
                     // Observe a local change before applying any peer update.
@@ -201,6 +207,9 @@ mod sync {
                                 pending = None;
                                 was_available = false;
                             } else if let Some(content) = snapshot.content.and_then(valid_local) {
+                                if matches!(&content, Content::Png(_)) {
+                                    debug!("queued clipboard image");
+                                }
                                 outgoing
                                     .send_replace(Some(Arc::new(revisions.local_change(content)?)));
                             } else {
@@ -214,11 +223,19 @@ mod sync {
                             } else if os.available() {
                                 match os.write(sequence, update.content()) {
                                     Ok(WriteOutcome::Applied(applied)) => {
+                                        if matches!(update.content(), Content::Png(_)) {
+                                            debug!("applied clipboard image");
+                                        }
                                         sequence = applied;
                                         revisions.accept_remote(update);
                                         pending = None;
                                     }
-                                    Ok(WriteOutcome::Unsupported) => pending = None,
+                                    Ok(WriteOutcome::Unsupported) => {
+                                        debug!(
+                                            "clipboard image exceeded limits or failed validation"
+                                        );
+                                        pending = None;
+                                    }
                                     Ok(WriteOutcome::Changed) | Err(_) => {}
                                 }
                             }

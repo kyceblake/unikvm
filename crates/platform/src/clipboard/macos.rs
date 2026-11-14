@@ -15,6 +15,8 @@ use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BY
 use super::{Snapshot, WriteOutcome, imaging};
 
 const TRANSIENT: &str = "org.nspasteboard.TransientType";
+const JPEG: &str = "public.jpeg";
+const MAX_PASTEBOARD_ITEMS: usize = 16;
 const SKIP_TYPES: &[&str] = &[
     TRANSIENT,
     "org.nspasteboard.ConcealedType",
@@ -67,39 +69,43 @@ impl Clipboard {
                         .iter()
                         .any(|name| types.containsObject(&NSString::from_str(name)))
             });
-            let item = eligible
-                .then(|| self.board.pasteboardItems())
-                .flatten()
-                .filter(|items| items.len() == 1)
-                .and_then(|items| items.firstObject());
-            let read = |kind, limit| {
-                item.as_ref()?
-                    .dataForType(kind)
-                    .filter(|data| data.len() <= limit)
-                    .map(|data| data.to_vec())
-            };
-            let text =
-                read(text_type, MAX_TEXT_BYTES).and_then(|data| String::from_utf8(data).ok());
-            let image = if text.as_deref().is_none_or(str::is_empty) {
-                read(png_type, MAX_PNG_BYTES)
-                    .and_then(|data| imaging::normalize(&data, ImageFormat::Png))
-                    .or_else(|| {
-                        read(tiff_type, imaging::MAX_NATIVE_BYTES)
-                            .and_then(|data| imaging::normalize(&data, ImageFormat::Tiff))
-                    })
-                    .map(Content::Png)
-            } else {
-                None
-            };
-            let content = image.or_else(|| {
-                text.map(|plain| {
-                    let html = read(html_type, MAX_HTML_BYTES)
-                        .and_then(|data| String::from_utf8(data).ok());
-                    Content::Text { plain, html }
-                })
+            let content = eligible.then(|| {
+                let items = self.board.pasteboardItems()?;
+                let jpeg = NSString::from_str(JPEG);
+                let formats = [
+                    (png_type, ImageFormat::Png),
+                    (tiff_type, ImageFormat::Tiff),
+                    (&*jpeg, ImageFormat::Jpeg),
+                ];
+                // Use a single explicit raster representation. Auxiliary items
+                // and a plain URL or caption do not take precedence over pixels.
+                for item in items.iter().take(MAX_PASTEBOARD_ITEMS) {
+                    let types = item.types();
+                    let png = formats
+                        .iter()
+                        .filter(|(kind, _)| types.containsObject(kind))
+                        .find_map(|(kind, format)| {
+                            let data = read_item(&item, kind, imaging::MAX_NATIVE_BYTES)?;
+                            imaging::normalize(&data, *format)
+                        });
+                    if let Some(png) = png {
+                        return Some(Content::Png(png));
+                    }
+                }
+                if items.len() != 1 {
+                    return None;
+                }
+                let item = items.firstObject()?;
+                let plain = String::from_utf8(read_item(&item, text_type, MAX_TEXT_BYTES)?).ok()?;
+                let html = read_item(&item, html_type, MAX_HTML_BYTES)
+                    .and_then(|data| String::from_utf8(data).ok());
+                Some(Content::Text { plain, html })
             });
             // The type list and the contents must belong to the same item generation.
-            Ok((self.sequence()? == sequence).then_some(Snapshot { sequence, content }))
+            Ok((self.sequence()? == sequence).then_some(Snapshot {
+                sequence,
+                content: content.flatten(),
+            }))
         })
     }
 
@@ -155,6 +161,11 @@ impl Clipboard {
     }
 }
 
+fn read_item(item: &NSPasteboardItem, kind: &NSString, limit: usize) -> Option<Vec<u8>> {
+    let data = item.dataForType(kind)?;
+    (data.len() <= limit).then(|| data.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,22 +211,33 @@ mod tests {
 
     #[test]
     #[ignore = "requires a logged-in macOS desktop"]
-    fn native_tiff_is_imported_and_received_png_is_marked() {
+    fn native_image_with_a_caption_and_auxiliary_item_is_imported_without_echo() {
         autoreleasepool(|_| {
             let clipboard = Clipboard {
                 board: NSPasteboard::pasteboardWithUniqueName(),
             };
             let source = image::RgbaImage::from_pixel(2, 3, image::Rgba([20, 80, 120, 64]));
             // SAFETY: AppKit initializes these immutable exported type names.
-            let (png_type, tiff_type) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeTIFF) };
+            let (png_type, tiff_type, text_type) = unsafe {
+                (
+                    NSPasteboardTypePNG,
+                    NSPasteboardTypeTIFF,
+                    NSPasteboardTypeString,
+                )
+            };
             let initial = clipboard.sequence().unwrap();
             clipboard.board.clearContents();
             let tiff = imaging::to_tiff(&source).unwrap();
-            assert!(
-                clipboard
-                    .board
-                    .setData_forType(Some(&NSData::with_bytes(&tiff)), tiff_type)
-            );
+            let copied = NSPasteboardItem::new();
+            assert!(copied.setString_forType(&NSString::from_str("Image caption"), text_type));
+            assert!(copied.setData_forType(&NSData::with_bytes(&tiff), tiff_type));
+            let auxiliary = NSPasteboardItem::new();
+            assert!(auxiliary.setString_forType(&NSString::from_str("Page title"), text_type));
+            let items = NSArray::from_retained_slice(&[
+                ProtocolObject::<dyn NSPasteboardWriting>::from_retained(auxiliary),
+                ProtocolObject::<dyn NSPasteboardWriting>::from_retained(copied),
+            ]);
+            assert!(clipboard.board.writeObjects(&items));
             let snapshot = clipboard.read(initial).unwrap().unwrap();
             let Some(content @ Content::Png(_)) = snapshot.content else {
                 panic!("private pasteboard did not expose an image");

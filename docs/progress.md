@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Mac image copy compatibility
+
+- The operator confirmed Windows-to-Mac image paste. Windows logged outbound images and an active clipboard v3 session, with no incoming image during the Mac-to-Windows attempts.
+- The Mac adapter now looks for supported raster data across a bounded number of pasteboard items, even when an image has accompanying text or browser metadata. It also reads JPEG representations. File copies and privacy markers remain excluded.
+- Windows formatting, strict Clippy, all 58 workspace tests, and the build passed on rerun after a transient three-peer test failure. Cargo deny passed. The Apple Silicon cross-check is still blocked by Windows access-denied errors starting the compiler.
+- Next, update the Mac agent and repeat Mac-to-Windows paste in Paint. The private Mac pasteboard regression covers an image with a caption and an auxiliary item.
+
 ## 2026-11-14 — Phase 4 image clipboard sync
 
 - Added a bounded PNG update in clipboard protocol v3. Windows converts PNG and DIB and publishes PNG with DIBV5. macOS converts PNG and TIFF and publishes both formats. Text and HTML continue to share one revision, and nonempty text takes priority on copies with both text and image data.
