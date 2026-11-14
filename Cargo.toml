@@ -24,6 +24,7 @@ core-foundation = "0.10.1"
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 foreign-types = "0.5.0"
 if-addrs = "0.15.0"
+image = { version = "0.25.10", default-features = false }
 mdns-sd = { version = "0.21.7", default-features = false, features = ["async"] }
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false }

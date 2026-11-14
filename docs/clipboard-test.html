@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UniKVM clipboard test</title>
+  <style>
+    body {
+      font: 1.125rem/1.55 "Inter", system-ui, sans-serif;
+      margin: 3rem auto;
+      max-width: 38rem;
+      padding: 0 1.25rem;
+    }
+    section { margin-top: 2rem; }
+    h2 { font-size: 1.25rem; }
+  </style>
+</head>
+<body>
+  <h1>UniKVM clipboard test</h1>
+  <p>Select and copy the rendered sample on the sending machine. On the other
+    machine, use normal Paste in a rich-text editor, then paste again in a
+    plain-text editor. The words and characters should match in both editors.</p>
+
+  <section>
+    <h2>Windows to Mac</h2>
+    <p><strong>Windows sample</strong> with <em>italic text</em>,
+      <span style="color: #1c4ed8; text-decoration: underline;">blue underlined text</span>,
+      and 日本語 🧪.</p>
+  </section>
+
+  <section>
+    <h2>Mac to Windows</h2>
+    <p><strong>Mac sample</strong> with <em>italic text</em>,
+      <span style="color: #991b1b; text-decoration: underline;">red underlined text</span>,
+      and café 한국어 ✨.</p>
+  </section>
+</body>
+</html>

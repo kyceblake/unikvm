@@ -3,6 +3,8 @@
 use std::io;
 use std::ptr::null_mut;
 
+use image::ImageFormat;
+use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BYTES};
 use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL, HWND};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
@@ -11,10 +13,10 @@ use windows_sys::Win32::System::DataExchange::{
 use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
-use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
+use windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE};
 
-use super::{Snapshot, WriteOutcome, cf_html};
+use super::{Snapshot, WriteOutcome, cf_html, imaging};
 use crate::input::windows::check_input_desktop;
 
 pub struct Clipboard {
@@ -22,6 +24,7 @@ pub struct Clipboard {
     history: u32,
     cloud: u32,
     html: u32,
+    png: u32,
 }
 
 impl Clipboard {
@@ -30,11 +33,13 @@ impl Clipboard {
         let history = format("CanIncludeInClipboardHistory")?;
         let cloud = format("CanUploadToCloudClipboard")?;
         let html = format("HTML Format")?;
+        let png = format("PNG")?;
         Ok(Self {
             exclude,
             history,
             cloud,
             html,
+            png,
         })
     }
 
@@ -47,49 +52,91 @@ impl Clipboard {
         Ok(u64::from(unsafe { GetClipboardSequenceNumber() }))
     }
 
-    pub fn read(
-        &self,
-        previous: u64,
-        text_limit: usize,
-        html_limit: usize,
-    ) -> io::Result<Option<Snapshot>> {
+    pub fn read(&self, previous: u64) -> io::Result<Option<Snapshot>> {
         if self.sequence()? == previous {
             return Ok(None);
         }
-        let _clipboard = Open::new(null_mut())?;
+        let clipboard = Open::new(null_mut())?;
         let sequence = self.sequence()?;
         if sequence == previous {
             return Ok(None);
         }
         // SAFETY: All formats are registered or standard, and the clipboard is open.
-        let (text, html) = unsafe {
+        let (mut content, image) = unsafe {
             if IsClipboardFormatAvailable(self.exclude) != 0
                 || IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0
                 || opt_out(self.history)
                 || opt_out(self.cloud)
-                || IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) == 0
             {
                 (None, None)
             } else {
-                let text = read_text(text_limit)?;
-                let html = text.as_ref().and_then(|_| read_html(self.html, html_limit));
-                (text, html)
+                let text = if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0 {
+                    read_text(MAX_TEXT_BYTES)?
+                } else {
+                    None
+                };
+                let image = if text.as_deref().is_none_or(str::is_empty) {
+                    [self.png, u32::from(CF_DIBV5), u32::from(CF_DIB)]
+                        .into_iter()
+                        .find_map(|format| {
+                            let limit = if format == self.png {
+                                MAX_PNG_BYTES
+                            } else {
+                                imaging::MAX_NATIVE_BYTES
+                            };
+                            read_bytes(format, limit).map(|bytes| (format, bytes))
+                        })
+                } else {
+                    None
+                };
+                let content = text.map(|plain| Content::Text {
+                    plain,
+                    html: read_html(self.html, MAX_HTML_BYTES),
+                });
+                (content, image)
             }
         };
-        Ok(Some(Snapshot {
-            sequence: self.sequence()?,
-            text,
-            html,
-        }))
+        let sequence = self.sequence()?;
+        drop(clipboard);
+        if let Some((format, bytes)) = image {
+            let png = if format == self.png {
+                imaging::normalize(&bytes, ImageFormat::Png)
+            } else {
+                imaging::from_dib(&bytes)
+            };
+            if let Some(png) = png {
+                content = Some(Content::Png(png));
+            }
+        }
+        Ok((self.sequence()? == sequence).then_some(Snapshot { sequence, content }))
     }
 
-    pub fn write(&self, expected: u64, text: &str, html: Option<&str>) -> io::Result<WriteOutcome> {
-        let utf16: Vec<u16> = text.encode_utf16().chain([0]).collect();
-        let data = Memory::new(&utf16)?;
+    pub fn write(&self, expected: u64, content: &Content) -> io::Result<WriteOutcome> {
+        let (format, data, extra) = match content {
+            Content::Text { plain, html } => {
+                let utf16: Vec<u16> = plain.encode_utf16().chain([0]).collect();
+                let data = Memory::new(&utf16)?;
+                let html = html
+                    .as_ref()
+                    .map(|text| {
+                        Memory::new(cf_html::encode(text).as_bytes()).map(|data| (self.html, data))
+                    })
+                    .transpose()?;
+                (u32::from(CF_UNICODETEXT), data, html)
+            }
+            Content::Png(png) => {
+                let Some(pixels) = imaging::decode(png, ImageFormat::Png) else {
+                    return Ok(WriteOutcome::Unsupported);
+                };
+                let Some(png) = imaging::to_png(&pixels) else {
+                    return Ok(WriteOutcome::Unsupported);
+                };
+                let data = Memory::new(&imaging::to_dib(&pixels))?;
+                let png = Memory::new(&png)?;
+                (u32::from(CF_DIBV5), data, Some((self.png, png)))
+            }
+        };
         let excluded = Memory::new(&[0u8])?;
-        let html = html
-            .map(|text| Memory::new(cf_html::encode(text).as_bytes()))
-            .transpose()?;
         let owner = Owner::new()?;
         let _clipboard = Open::new(owner.0)?;
         if self.sequence()? != expected {
@@ -100,16 +147,38 @@ impl Clipboard {
             return Err(io::Error::last_os_error());
         }
         excluded.publish(self.exclude)?;
-        if let Some(html) = html {
-            // Publish the richest recognized format first. Plain text still works
-            // if the optional format cannot be published.
-            let _ = html.publish(self.html);
+        if let Some((format, extra)) = extra {
+            let _ = extra.publish(format);
         }
-        data.publish(u32::from(CF_UNICODETEXT))?;
+        data.publish(format)?;
         // Record the sequence under the clipboard lock. Windows may advance
         // it on close. The exclusion marker suppresses that notification
         // without also hiding a local copy that wins the race after close.
         Ok(WriteOutcome::Applied(self.sequence()?))
+    }
+}
+
+unsafe fn read_bytes(format: u32, limit: usize) -> Option<Vec<u8>> {
+    // SAFETY: The clipboard is open. Read only the allocated global block, then unlock.
+    unsafe {
+        if IsClipboardFormatAvailable(format) == 0 {
+            return None;
+        }
+        let handle = GetClipboardData(format);
+        if handle.is_null() {
+            return None;
+        }
+        let len = GlobalSize(handle);
+        if len == 0 || len > limit {
+            return None;
+        }
+        let data = GlobalLock(handle).cast::<u8>();
+        if data.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(data, len).to_vec();
+        GlobalUnlock(handle);
+        Some(bytes)
     }
 }
 
@@ -330,7 +399,7 @@ mod tests {
             }
             (clipboard.sequence().unwrap(), has_formats)
         };
-        struct Restore<'a>(&'a Clipboard, bool);
+        struct Restore<'a>(&'a Clipboard, bool, Option<Vec<u8>>);
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
                 if let Ok(owner) = Owner::new()
@@ -339,7 +408,11 @@ mod tests {
                     // SAFETY: The clipboard is open. Clear only the marked test text.
                     unsafe {
                         if IsClipboardFormatAvailable(self.0.exclude) == 0
-                            || read_text(64 * 1024).ok().flatten().as_deref() != Some(TEXT)
+                            || !(read_text(64 * 1024).ok().flatten().as_deref() == Some(TEXT)
+                                || self.2.as_ref().is_some_and(|test_png| {
+                                    read_bytes(self.0.png, MAX_PNG_BYTES)
+                                        .is_some_and(|bytes| bytes.starts_with(test_png))
+                                }))
                         {
                             return;
                         }
@@ -353,27 +426,52 @@ mod tests {
                 }
             }
         }
-        let _restore = Restore(&clipboard, had_empty_text);
+        let mut restore = Restore(&clipboard, had_empty_text, None);
         let html = "<strong>日本語🧪</strong>";
-        let WriteOutcome::Applied(_) = clipboard.write(empty, TEXT, Some(html)).unwrap() else {
+        let content = Content::Text {
+            plain: TEXT.into(),
+            html: Some(html.into()),
+        };
+        let WriteOutcome::Applied(_) = clipboard.write(empty, &content).unwrap() else {
             panic!("clipboard changed before the test write");
         };
         assert!(matches!(
-            clipboard.write(empty, "stale", None).unwrap(),
+            clipboard.write(empty, &content).unwrap(),
             WriteOutcome::Changed
         ));
-        let snapshot = clipboard
-            .read(empty, 64 * 1024, 64 * 1024)
-            .unwrap()
-            .unwrap();
+        let snapshot = clipboard.read(empty).unwrap().unwrap();
         assert!(
-            snapshot.text.is_none(),
+            snapshot.content.is_none(),
             "remote text must not be reread for sync"
         );
-        assert!(snapshot.html.is_none());
-        let _open = Open::new(null_mut()).unwrap();
+        let open = Open::new(null_mut()).unwrap();
         // SAFETY: Read the test string directly from the currently open clipboard.
         assert!(unsafe { read_text(64 * 1024) }.unwrap().as_deref() == Some(TEXT));
         assert!(unsafe { read_html(clipboard.html, 64 * 1024) }.as_deref() == Some(html));
+        drop(open);
+        let pixels = image::RgbaImage::from_pixel(2, 3, image::Rgba([20, 80, 120, 64]));
+        let png = imaging::to_png(&pixels).unwrap();
+        restore.2 = Some(png.clone());
+        let before_image = clipboard.sequence().unwrap();
+        let result = clipboard
+            .write(before_image, &Content::Png(png.clone()))
+            .unwrap();
+        assert!(matches!(result, WriteOutcome::Applied(_)));
+        assert!(
+            clipboard
+                .read(before_image)
+                .unwrap()
+                .unwrap()
+                .content
+                .is_none()
+        );
+        let _open = Open::new(null_mut()).unwrap();
+        // SAFETY: The clipboard is open on this thread.
+        let native_png = unsafe { read_bytes(clipboard.png, MAX_PNG_BYTES) }.unwrap();
+        assert!(native_png.starts_with(&png));
+        let native_dib =
+            unsafe { read_bytes(u32::from(CF_DIBV5), imaging::MAX_NATIVE_BYTES) }.unwrap();
+        let decoded = imaging::from_dib(&native_dib).unwrap();
+        assert_eq!(imaging::decode(&decoded, ImageFormat::Png).unwrap(), pixels);
     }
 }

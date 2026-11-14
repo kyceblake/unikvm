@@ -1,11 +1,18 @@
 # Progress
 
+## 2026-11-14 — Phase 4 image clipboard sync
+
+- Added a bounded PNG update in clipboard protocol v3. Windows converts PNG and DIB and publishes PNG with DIBV5. macOS converts PNG and TIFF and publishes both formats. Text and HTML continue to share one revision, and nonempty text takes priority on copies with both text and image data.
+- Windows formatting, strict Clippy, build, 58 workspace tests, and the native clipboard regression passed. Tests covered PNG bounds, alpha and orientation, and authenticated bidirectional transport. Linux cross-target Clippy and cargo deny passed. Windows returned access denied while starting the compiler for Apple Silicon dependencies.
+- Next, update both agents and test image copy and paste in both directions, including a screenshot and a transparent PNG. Repeat a formatted-text paste to check the existing path with clipboard protocol v3. [Clipboard test instructions](clipboard-sync.md)
+
 ## 2026-11-14 — Phase 4 HTML clipboard sync
 
 - Added optional HTML alongside the plain-text representation under the same revision. Both representations are limited to 64 KiB each. Both agents need clipboard protocol version 2.
 - Windows publishes HTML Format with UTF-8 byte offsets and transfers the selected fragment. macOS reads and writes HTML and plain text on the same pasteboard item. Both retain privacy markers and echo suppression. [Microsoft HTML Clipboard Format](https://learn.microsoft.com/en-us/windows/win32/dataxchg/html-clipboard-format), [Apple pasteboard items](https://developer.apple.com/documentation/appkit/nspasteboarditem)
 - Windows formatting, strict Clippy, build, 56 workspace tests, and the native clipboard regression passed. Linux cross-target Clippy passed. Windows returned access denied while starting the compiler for the Apple Silicon AppKit dependencies.
-- Next, update both agents and verify browser-to-editor rich-text and plain-text paste in both directions on the paired desktops.
+- The operator confirmed the browser clipboard test worked between the paired Windows and Mac desktops. The Windows log confirmed the clipboard v2 session connected.
+- Next, add image clipboard sync.
 
 ## 2026-11-14 — Phase 4 native clipboard sync
 

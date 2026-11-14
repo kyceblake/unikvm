@@ -17,6 +17,7 @@ zeroize.workspace = true
 core-foundation.workspace = true
 core-graphics.workspace = true
 foreign-types.workspace = true
+image = { workspace = true, features = ["png", "tiff"] }
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
 objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSData", "NSString"] }
@@ -26,6 +27,7 @@ unikvm-core.workspace = true
 rustix = { workspace = true, features = ["fs", "process"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+image = { workspace = true, features = ["bmp", "png"] }
 unikvm-core.workspace = true
 windows-sys = { workspace = true, features = [
     "Win32_Graphics_Gdi",

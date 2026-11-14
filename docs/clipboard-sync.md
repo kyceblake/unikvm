@@ -1,4 +1,4 @@
-# Share text and HTML between Windows and Mac
+# Share text, HTML, and images between Windows and Mac
 
 Use a working [paired connection](manual-pairing.md) and a clipboard-enabled build on both machines. Add this table to each machine's `local-pairing/agent.toml`, using the other machine's pinned fingerprint. If you already use input sharing, copy the value from that machine's `[input]` table.
 
@@ -7,6 +7,10 @@ Use a working [paired connection](manual-pairing.md) and a clipboard-enabled bui
 peer_fingerprint = "OTHER_DEVICE_FINGERPRINT"
 ```
 
-Update and restart both agents, then wait for `clipboard sync connected` in both logs. Both builds must speak clipboard protocol version 2. On macOS, allow pasteboard access if macOS prompts. With both desktops unlocked, copy a formatted paragraph from a browser on Windows. Paste it into a Mac rich-text editor and then a plain-text editor. Repeat from Mac to Windows. Clipboard sharing works independently of which machine currently receives mouse and keyboard input. [Apple pasteboard access](https://developer.apple.com/documentation/appkit/nspasteboard/accessbehavior-swift.enum)
+Update and restart both agents, then wait for `clipboard sync connected` in both logs. Both builds must speak clipboard protocol version 3. On macOS, allow pasteboard access if macOS prompts. With both desktops unlocked, copy a formatted paragraph from a browser on Windows. Paste it into a Mac rich-text editor and then a plain-text editor. Repeat from Mac to Windows. Clipboard sharing works independently of which machine currently receives mouse and keyboard input. [Apple pasteboard access](https://developer.apple.com/documentation/appkit/nspasteboard/accessbehavior-swift.enum)
 
-The limits are 64 KiB of UTF-8 plain text and 64 KiB of optional HTML per copy. The agent requires a plain-text representation and falls back to it when HTML is absent, invalid, or too large. The Windows adapter transfers the selected HTML fragment, so formatting that depends on styles outside the selection can be lost. The receiving editor controls which markup it imports. RTF, files, and images are outside this slice. The agent sends new copies made after the clipboard session starts and skips entries with supported sensitive-content markers. Remove the `[clipboard]` table and restart either agent to pause sharing.
+The limits are 64 KiB of UTF-8 plain text and 64 KiB of optional HTML per copy. The Windows adapter transfers the selected HTML fragment, so formatting that depends on styles outside the selection can be lost. The receiving editor controls which markup it imports.
+
+To test images, open a small image on each desktop and use the app's **Copy Image** command. Paste into an image editor on the other desktop. Try a screenshot and a PNG with transparency. The wire format is PNG, limited to 8 MiB, 4096 pixels per side, and 9,437,184 pixels total. Windows reads PNG and DIB and publishes PNG and DIBV5. macOS reads and publishes PNG and TIFF. When a copy contains nonempty text alongside an image, the text takes priority. File copies from Explorer or Finder are outside this phase.
+
+The agent sends new copies made after the clipboard session starts and skips entries with supported sensitive-content markers. Remove the `[clipboard]` table and restart either agent to pause sharing.

@@ -2,15 +2,17 @@
 
 use std::io;
 
+use image::ImageFormat;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{
     NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
-    NSPasteboardTypeString, NSPasteboardWriting,
+    NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF, NSPasteboardWriting,
 };
 use objc2_foundation::{NSArray, NSData, NSString};
+use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BYTES};
 
-use super::{Snapshot, WriteOutcome};
+use super::{Snapshot, WriteOutcome, imaging};
 
 const TRANSIENT: &str = "org.nspasteboard.TransientType";
 const SKIP_TYPES: &[&str] = &[
@@ -42,23 +44,20 @@ impl Clipboard {
         autoreleasepool(|_| Ok(self.board.changeCount() as u64))
     }
 
-    pub fn read(
-        &self,
-        previous: u64,
-        text_limit: usize,
-        html_limit: usize,
-    ) -> io::Result<Option<Snapshot>> {
+    pub fn read(&self, previous: u64) -> io::Result<Option<Snapshot>> {
         autoreleasepool(|_| {
             let sequence = self.sequence()?;
             if sequence == previous {
                 return Ok(None);
             }
             // SAFETY: AppKit initializes these immutable exported type names.
-            let (text_type, html_type, file_type) = unsafe {
+            let (text_type, html_type, file_type, png_type, tiff_type) = unsafe {
                 (
                     NSPasteboardTypeString,
                     NSPasteboardTypeHTML,
                     NSPasteboardTypeFileURL,
+                    NSPasteboardTypePNG,
+                    NSPasteboardTypeTIFF,
                 )
             };
             let types = self.board.types();
@@ -67,7 +66,6 @@ impl Clipboard {
                     && !SKIP_TYPES
                         .iter()
                         .any(|name| types.containsObject(&NSString::from_str(name)))
-                    && types.containsObject(text_type)
             });
             let item = eligible
                 .then(|| self.board.pasteboardItems())
@@ -78,32 +76,70 @@ impl Clipboard {
                 item.as_ref()?
                     .dataForType(kind)
                     .filter(|data| data.len() <= limit)
-                    .and_then(|data| String::from_utf8(data.to_vec()).ok())
+                    .map(|data| data.to_vec())
             };
-            let text = read(text_type, text_limit);
-            let html = text.as_ref().and_then(|_| read(html_type, html_limit));
+            let text =
+                read(text_type, MAX_TEXT_BYTES).and_then(|data| String::from_utf8(data).ok());
+            let image = if text.as_deref().is_none_or(str::is_empty) {
+                read(png_type, MAX_PNG_BYTES)
+                    .and_then(|data| imaging::normalize(&data, ImageFormat::Png))
+                    .or_else(|| {
+                        read(tiff_type, imaging::MAX_NATIVE_BYTES)
+                            .and_then(|data| imaging::normalize(&data, ImageFormat::Tiff))
+                    })
+                    .map(Content::Png)
+            } else {
+                None
+            };
+            let content = image.or_else(|| {
+                text.map(|plain| {
+                    let html = read(html_type, MAX_HTML_BYTES)
+                        .and_then(|data| String::from_utf8(data).ok());
+                    Content::Text { plain, html }
+                })
+            });
             // The type list and the contents must belong to the same item generation.
-            Ok((self.sequence()? == sequence).then_some(Snapshot {
-                sequence,
-                text,
-                html,
-            }))
+            Ok((self.sequence()? == sequence).then_some(Snapshot { sequence, content }))
         })
     }
 
-    pub fn write(&self, expected: u64, text: &str, html: Option<&str>) -> io::Result<WriteOutcome> {
+    pub fn write(&self, expected: u64, content: &Content) -> io::Result<WriteOutcome> {
         autoreleasepool(|_| {
             let item = NSPasteboardItem::new();
-            let data = NSData::with_bytes(text.as_bytes());
             // SAFETY: AppKit initializes this immutable exported type name.
-            let (plain, rich) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeHTML) };
-            if let Some(html) = html {
-                let _ = item.setData_forType(&NSData::with_bytes(html.as_bytes()), rich);
-            }
-            if !item.setData_forType(&data, plain)
+            let (text_type, html_type, png_type, tiff_type) = unsafe {
+                (
+                    NSPasteboardTypeString,
+                    NSPasteboardTypeHTML,
+                    NSPasteboardTypePNG,
+                    NSPasteboardTypeTIFF,
+                )
+            };
+            let set = |kind, bytes: &[u8]| item.setData_forType(&NSData::with_bytes(bytes), kind);
+            let prepared = match content {
+                Content::Text { plain, html } => {
+                    if let Some(html) = html {
+                        let _ = set(html_type, html.as_bytes());
+                    }
+                    set(text_type, plain.as_bytes())
+                }
+                Content::Png(png) => {
+                    let Some(pixels) = imaging::decode(png, ImageFormat::Png) else {
+                        return Ok(WriteOutcome::Unsupported);
+                    };
+                    let Some(png) = imaging::to_png(&pixels) else {
+                        return Ok(WriteOutcome::Unsupported);
+                    };
+                    if let Some(tiff) = imaging::to_tiff(&pixels) {
+                        let _ = set(tiff_type, &tiff);
+                    }
+                    set(png_type, &png)
+                }
+            };
+            if !prepared
                 || !item.setData_forType(&NSData::with_bytes(&[]), &NSString::from_str(TRANSIENT))
             {
-                return Err(io::Error::other("could not prepare Mac pasteboard text"));
+                return Err(io::Error::other("could not prepare Mac pasteboard data"));
             }
             let item = ProtocolObject::<dyn NSPasteboardWriting>::from_retained(item);
             let items = NSArray::from_retained_slice(&[item]);
@@ -112,7 +148,7 @@ impl Clipboard {
             }
             let sequence = self.board.clearContents() as u64;
             if !self.board.writeObjects(&items) {
-                return Err(io::Error::other("could not write Mac pasteboard text"));
+                return Err(io::Error::other("could not write Mac pasteboard data"));
             }
             Ok(WriteOutcome::Applied(sequence))
         })
@@ -146,26 +182,59 @@ mod tests {
                     .board
                     .setData_forType(Some(&NSData::with_bytes(html.as_bytes())), rich)
             );
-            let snapshot = clipboard
-                .read(initial, 64 * 1024, 64 * 1024)
-                .unwrap()
-                .unwrap();
-            assert!(snapshot.text.as_deref() == Some(text));
-            assert!(snapshot.html.as_deref() == Some(html));
-            let WriteOutcome::Applied(_) = clipboard
-                .write(snapshot.sequence, text, Some(html))
-                .unwrap()
+            let snapshot = clipboard.read(initial).unwrap().unwrap();
+            let content = snapshot.content.unwrap();
+            assert!(matches!(&content, Content::Text { plain, html: rich }
+                if plain == text && rich.as_deref() == Some(html)));
+            let WriteOutcome::Applied(_) = clipboard.write(snapshot.sequence, &content).unwrap()
             else {
                 panic!("private pasteboard changed unexpectedly");
             };
-            let snapshot = clipboard
-                .read(snapshot.sequence, 64 * 1024, 64 * 1024)
-                .unwrap()
-                .unwrap();
-            assert!(snapshot.text.is_none());
-            assert!(snapshot.html.is_none());
+            let snapshot = clipboard.read(snapshot.sequence).unwrap().unwrap();
+            assert!(snapshot.content.is_none());
             assert!(clipboard.board.stringForType(kind).unwrap().to_string() == text);
             assert!(clipboard.board.dataForType(rich).unwrap().to_vec() == html.as_bytes());
+            clipboard.board.clearContents();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires a logged-in macOS desktop"]
+    fn native_tiff_is_imported_and_received_png_is_marked() {
+        autoreleasepool(|_| {
+            let clipboard = Clipboard {
+                board: NSPasteboard::pasteboardWithUniqueName(),
+            };
+            let source = image::RgbaImage::from_pixel(2, 3, image::Rgba([20, 80, 120, 64]));
+            // SAFETY: AppKit initializes these immutable exported type names.
+            let (png_type, tiff_type) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeTIFF) };
+            let initial = clipboard.sequence().unwrap();
+            clipboard.board.clearContents();
+            let tiff = imaging::to_tiff(&source).unwrap();
+            assert!(
+                clipboard
+                    .board
+                    .setData_forType(Some(&NSData::with_bytes(&tiff)), tiff_type)
+            );
+            let snapshot = clipboard.read(initial).unwrap().unwrap();
+            let Some(content @ Content::Png(_)) = snapshot.content else {
+                panic!("private pasteboard did not expose an image");
+            };
+            assert!(matches!(
+                clipboard.write(snapshot.sequence, &content).unwrap(),
+                WriteOutcome::Applied(_)
+            ));
+            assert!(
+                clipboard
+                    .read(snapshot.sequence)
+                    .unwrap()
+                    .unwrap()
+                    .content
+                    .is_none()
+            );
+            assert!(clipboard.board.dataForType(tiff_type).is_some());
+            let png = clipboard.board.dataForType(png_type).unwrap().to_vec();
+            assert_eq!(imaging::decode(&png, ImageFormat::Png).unwrap(), source);
             clipboard.board.clearContents();
         });
     }

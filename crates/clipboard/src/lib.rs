@@ -3,8 +3,9 @@
 use std::io;
 use std::num::NonZeroU64;
 
+use unikvm_core::clipboard::Content;
 use unikvm_core::device::DeviceId;
-use unikvm_protocol::clipboard::{Revision, TextUpdate};
+use unikvm_protocol::clipboard::{Revision, Update};
 
 /// Keep one instance for the lifetime of a mutually enabled clipboard session.
 /// A fresh session observes new clipboard changes without sending existing text.
@@ -25,7 +26,7 @@ impl Revisions {
 
     /// Record a physical or application clipboard change. Native notifications
     /// caused by applying a peer update are filtered before calling this.
-    pub fn local_change(&mut self, text: String, html: Option<String>) -> io::Result<TextUpdate> {
+    pub fn local_change(&mut self, content: Content) -> io::Result<Update> {
         let counter = self.latest.map_or(0, |revision| revision.counter.get());
         let counter = counter
             .checked_add(1)
@@ -35,13 +36,13 @@ impl Revisions {
             counter,
             origin: self.local,
         };
-        let update = TextUpdate::with_html(revision, text, html)?;
+        let update = Update::new(revision, content)?;
         self.latest = Some(revision);
         Ok(update)
     }
 
     /// Record a newer update after a successful native write.
-    pub fn accept_remote(&mut self, update: &TextUpdate) -> bool {
+    pub fn accept_remote(&mut self, update: &Update) -> bool {
         if !self.is_new_remote(update) {
             return false;
         }
@@ -50,7 +51,7 @@ impl Revisions {
     }
 
     /// Check before writing so a busy native clipboard can be retried.
-    pub fn is_new_remote(&self, update: &TextUpdate) -> bool {
+    pub fn is_new_remote(&self, update: &Update) -> bool {
         let revision = update.revision();
         revision.origin == self.peer && self.latest.is_none_or(|latest| revision > latest)
     }
@@ -60,6 +61,13 @@ impl Revisions {
 mod tests {
     use super::*;
 
+    fn text(plain: &str, html: Option<&str>) -> Content {
+        Content::Text {
+            plain: plain.into(),
+            html: html.map(str::to_owned),
+        }
+    }
+
     const A: DeviceId = DeviceId([1; 16]);
     const B: DeviceId = DeviceId([2; 16]);
 
@@ -67,15 +75,15 @@ mod tests {
     fn concurrent_updates_converge_and_replay_cannot_replace_newer_text() {
         let mut a = Revisions::new(A, B);
         let mut b = Revisions::new(B, A);
-        let from_a = a.local_change("first".into(), None).unwrap();
+        let from_a = a.local_change(text("first", None)).unwrap();
         let from_b = b
-            .local_change("second".into(), Some("<b>second</b>".into()))
+            .local_change(text("second", Some("<b>second</b>")))
             .unwrap();
         assert!(a.accept_remote(&from_b));
         assert!(!b.accept_remote(&from_a));
         assert!(!a.accept_remote(&from_b));
 
-        let follow_up = a.local_change("third".into(), None).unwrap();
+        let follow_up = a.local_change(text("third", None)).unwrap();
         assert!(follow_up.revision() > from_b.revision());
         assert!(b.accept_remote(&follow_up));
         assert!(!b.accept_remote(&from_a));
@@ -85,9 +93,9 @@ mod tests {
     #[test]
     fn rejects_updates_with_an_origin_other_than_the_pinned_peer() {
         let mut a = Revisions::new(A, B);
-        let local = a.local_change("original".into(), None).unwrap();
+        let local = a.local_change(text("original", None)).unwrap();
         let mut unrelated = Revisions::new(DeviceId([3; 16]), A);
-        let forged = unrelated.local_change("unrelated".into(), None).unwrap();
+        let forged = unrelated.local_change(text("unrelated", None)).unwrap();
         assert!(!a.accept_remote(&local));
         assert!(!a.accept_remote(&forged));
         assert_eq!(a.latest, Some(local.revision()));

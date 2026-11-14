@@ -19,14 +19,16 @@ mod sync {
     use tokio::time::{MissedTickBehavior, interval, timeout};
     use tracing::{debug, info, warn};
     use unikvm_clipboard::Revisions;
+    use unikvm_core::clipboard::Content;
     use unikvm_core::device::DeviceId;
     use unikvm_platform::clipboard::{Clipboard, WriteOutcome};
-    use unikvm_protocol::clipboard::{self, MAX_HTML_BYTES, MAX_TEXT_BYTES, READY, TextUpdate};
+    use unikvm_protocol::clipboard::{self, READY, Update};
 
     use super::{ClipboardConfig, PeerEndpoint};
 
     const POLL: Duration = Duration::from_millis(150);
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+    const UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 
     pub struct Worker(Option<oneshot::Sender<()>>);
 
@@ -137,12 +139,12 @@ mod sync {
 
     async fn send_updates(
         mut send: quinn::SendStream,
-        mut updates: watch::Receiver<Option<Arc<TextUpdate>>>,
+        mut updates: watch::Receiver<Option<Arc<Update>>>,
     ) -> Result<()> {
         while updates.changed().await.is_ok() {
             let update = updates.borrow_and_update().clone();
             if let Some(update) = update {
-                timeout(HANDSHAKE_TIMEOUT, clipboard::write(&mut send, &update))
+                timeout(UPDATE_TIMEOUT, clipboard::write(&mut send, &update))
                     .await
                     .context("clipboard update write timed out")??;
             }
@@ -153,11 +155,11 @@ mod sync {
     async fn reconcile(
         os: &Clipboard,
         recv: &mut quinn::RecvStream,
-        outgoing: watch::Sender<Option<Arc<TextUpdate>>>,
+        outgoing: watch::Sender<Option<Arc<Update>>>,
         mut revisions: Revisions,
         mut sequence: u64,
     ) -> Result<()> {
-        let mut pending: Option<TextUpdate> = None;
+        let mut pending: Option<Update> = None;
         let mut poll = interval(POLL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut was_available = os.available();
@@ -191,20 +193,16 @@ mod sync {
                     }
                     // Observe a local change before applying any peer update.
                     // Busy native clipboards are retried on the next tick.
-                    if let Ok(snapshot) = os.read(sequence, MAX_TEXT_BYTES, MAX_HTML_BYTES) {
+                    if let Ok(snapshot) = os.read(sequence) {
                         if let Some(snapshot) = snapshot {
                             sequence = snapshot.sequence;
                             if !os.available() {
                                 outgoing.send_replace(None);
                                 pending = None;
                                 was_available = false;
-                            } else if let Some(text) = snapshot.text
-                                && !text.contains('\0')
-                            {
-                                let html = snapshot.html.filter(|html| !html.contains('\0'));
-                                outgoing.send_replace(Some(Arc::new(
-                                    revisions.local_change(text, html)?,
-                                )));
+                            } else if let Some(content) = snapshot.content.and_then(valid_local) {
+                                outgoing
+                                    .send_replace(Some(Arc::new(revisions.local_change(content)?)));
                             } else {
                                 outgoing.send_replace(None);
                                 pending = None;
@@ -213,13 +211,16 @@ mod sync {
                         if let Some(update) = pending.as_ref() {
                             if !revisions.is_new_remote(update) {
                                 pending = None;
-                            } else if os.available()
-                                && let Ok(WriteOutcome::Applied(applied)) =
-                                    os.write(sequence, update.text(), update.html())
-                            {
-                                sequence = applied;
-                                revisions.accept_remote(update);
-                                pending = None;
+                            } else if os.available() {
+                                match os.write(sequence, update.content()) {
+                                    Ok(WriteOutcome::Applied(applied)) => {
+                                        sequence = applied;
+                                        revisions.accept_remote(update);
+                                        pending = None;
+                                    }
+                                    Ok(WriteOutcome::Unsupported) => pending = None,
+                                    Ok(WriteOutcome::Changed) | Err(_) => {}
+                                }
                             }
                         }
                     }
@@ -229,6 +230,16 @@ mod sync {
                     break;
                 }
             }
+        }
+    }
+
+    fn valid_local(content: Content) -> Option<Content> {
+        match content {
+            Content::Text { plain, html } => (!plain.contains('\0')).then(|| Content::Text {
+                plain,
+                html: html.filter(|html| !html.contains('\0')),
+            }),
+            Content::Png(_) => Some(content),
         }
     }
 }

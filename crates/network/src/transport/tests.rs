@@ -351,9 +351,8 @@ async fn either_authenticated_endpoint_can_open_an_input_stream() {
 #[tokio::test]
 async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authenticated_link() {
     use std::num::NonZeroU64;
-    use unikvm_protocol::clipboard::{
-        self, MAX_HTML_BYTES, MAX_TEXT_BYTES, READY, Revision, TextUpdate,
-    };
+    use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_TEXT_BYTES, PNG_SIGNATURE};
+    use unikvm_protocol::clipboard::{self, READY, Revision, Update};
 
     let [a_addr, b_addr] = addresses();
     let a = Identity::generate().unwrap();
@@ -386,7 +385,14 @@ async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authentic
             origin,
         };
         let html = format!("<b>{}</b>", "あ".repeat((MAX_HTML_BYTES - 7) / 3));
-        let update = TextUpdate::with_html(revision, text, Some(html)).unwrap();
+        let update = Update::new(
+            revision,
+            Content::Text {
+                plain: text,
+                html: Some(html),
+            },
+        )
+        .unwrap();
         let (sent, received) = tokio::join!(
             clipboard::write(&mut send, &update),
             clipboard::read(&mut recv),
@@ -394,8 +400,20 @@ async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authentic
         sent.unwrap();
         let received = received.unwrap();
         assert_eq!(received.revision().origin, expected);
-        assert!(received.text() == update.text());
-        assert!(received.html() == update.html());
+        assert!(matches!((update.content(), received.content()),
+            (Content::Text { plain, html }, Content::Text { plain: received_plain, html: received_html })
+            if plain == received_plain && html == received_html));
+        // The transport treats PNG contents as opaque. Native adapters decode them.
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.resize(512 * 1024, 21);
+        let update = Update::new(revision, Content::Png(png)).unwrap();
+        let (sent, received) = tokio::join!(
+            clipboard::write(&mut send, &update),
+            clipboard::read(&mut recv),
+        );
+        sent.unwrap();
+        assert!(matches!((update.content(), received.unwrap().content()),
+            (Content::Png(png), Content::Png(received_png)) if png == received_png));
     };
     let a_id = a.fingerprint().device_id();
     let b_id = b.fingerprint().device_id();
