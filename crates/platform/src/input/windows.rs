@@ -35,8 +35,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::EdgeLayout;
 use super::capture::{
-    ARM_DELAY, Command, MonitorWake, POLL, PhysicalMotion, Shortcut, activity, button_state,
-    request_start,
+    ARM_DELAY, Command, IdleCursor, MonitorWake, POLL, PhysicalMotion, Shortcut, activity,
+    button_state, request_start,
 };
 use super::edge::EdgeTrigger;
 use super::windows_cursor::ParkedCursor;
@@ -61,6 +61,7 @@ struct HookState {
     swallowed_buttons: [bool; 5],
     anchor: POINT,
     cursor: Option<ParkedCursor>,
+    idle_cursor: IdleCursor,
     raw_motion: bool,
     stopped_generation: Option<u64>,
     generation: Option<u64>,
@@ -112,6 +113,7 @@ pub(super) fn run_hooks(
             swallowed_buttons: [false; 5],
             anchor: POINT::default(),
             cursor: None,
+            idle_cursor: IdleCursor::default(),
             raw_motion: false,
             stopped_generation: None,
             generation: None,
@@ -156,6 +158,9 @@ pub(super) fn run_hooks(
                 }
                 return;
             }
+            state
+                .idle_cursor
+                .update(&mut state.commands, &state.shortcuts);
             let command = *state.commands.borrow();
             match command {
                 Command::Remote {
@@ -178,7 +183,7 @@ pub(super) fn run_hooks(
                     }
                 }
                 Command::Local { return_height } => state.local(return_height),
-                Command::Remote { .. } => {}
+                Command::Remote { .. } | Command::HideAfterEdgeReturn { .. } => {}
             }
         });
         let mut message = MSG::default();
@@ -196,6 +201,7 @@ pub(super) fn run_hooks(
                 HOOK_STATE.with(|state| {
                     let mut state = state.borrow_mut();
                     let state = state.as_mut().expect("hook state initialized");
+                    state.idle_cursor.show();
                     state.relative_motion(dx, dy);
                 });
             }
@@ -218,6 +224,7 @@ pub(super) fn run_hooks(
     HOOK_STATE.with(|state| {
         if let Some(state) = state.borrow_mut().as_mut() {
             state.local(None);
+            state.idle_cursor.show();
         }
     });
     result
@@ -252,6 +259,7 @@ impl HookState {
 
     fn emergency(&mut self) {
         self.local(None);
+        self.idle_cursor.show();
         self.stopped_generation = self.generation;
         self.shortcuts.send_modify(|signal| {
             signal.stop = signal.stop.wrapping_add(1);
@@ -273,6 +281,7 @@ impl HookState {
         // Switching to the Japanese IME can produce an untagged key release
         // during remote injection. A physical press already reclaims control.
         if pressed {
+            self.idle_cursor.show();
             activity(&self.shortcuts);
         }
         let usage = key_usage(event.scanCode, event.flags & LLKHF_EXTENDED != 0);
@@ -327,6 +336,9 @@ impl HookState {
         self.last_pointer = event.pt;
         if event.flags & LLMHF_INJECTED != 0 {
             return false;
+        }
+        if message != WM_MOUSEMOVE || (event.pt.x, event.pt.y) != (previous.x, previous.y) {
+            self.idle_cursor.show();
         }
         if message != WM_MOUSEMOVE
             || (!self.remote
@@ -621,6 +633,7 @@ mod tests {
             swallowed_buttons: [false; 5],
             anchor: POINT::default(),
             cursor: None,
+            idle_cursor: IdleCursor::default(),
             raw_motion: false,
             stopped_generation: None,
             generation: None,

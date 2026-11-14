@@ -40,6 +40,10 @@ pub(super) struct BackgroundCursor {
 }
 
 impl BackgroundCursor {
+    pub(super) fn hide_idle() -> Result<Self, ()> {
+        Self::hide()
+    }
+
     pub(super) fn hide() -> Result<Self, ()> {
         // Darwin's RTLD_DEFAULT searches the current process's loaded images.
         const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;

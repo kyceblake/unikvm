@@ -32,8 +32,8 @@ use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 use super::EdgeLayout;
 use super::capture::{
-    ARM_DELAY, Command, MonitorWake, POLL, PhysicalMotion, Shortcut, activity, button_state,
-    request_start,
+    ARM_DELAY, Command, IdleCursor, MonitorWake, POLL, PhysicalMotion, Shortcut, activity,
+    button_state, request_start,
 };
 use super::edge::EdgeTrigger;
 use super::macos::{EVENT_TAG, MacInputSink, key_code};
@@ -59,6 +59,7 @@ const EVENT_TYPES: [CGEventType; 14] = {
     ]
 };
 const SCROLL_SCALE: f64 = 120.0;
+const MOMENTUM_PHASE: u32 = 123;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -94,6 +95,7 @@ struct TapState {
     events: mpsc::Sender<InputEvent>,
     allow_send: bool,
     cursor: Option<CapturedCursor>,
+    idle_cursor: IdleCursor,
     chords: [bool; 2],
     swallowed_keys: [bool; 256],
     swallowed_buttons: [bool; 5],
@@ -175,6 +177,7 @@ pub(super) fn run_tap(
         events,
         allow_send,
         cursor: None,
+        idle_cursor: IdleCursor::default(),
         chords: [false; 2],
         swallowed_keys: [false; 256],
         swallowed_buttons: [false; 5],
@@ -241,6 +244,10 @@ pub(super) fn run_tap(
             secured = secure;
             if !secure {
                 let mut state = state.borrow_mut();
+                let state = &mut *state;
+                state
+                    .idle_cursor
+                    .update(&mut state.commands, &state.shortcuts);
                 let command = *state.commands.borrow();
                 state.update(command);
             }
@@ -328,7 +335,7 @@ impl TapState {
                     self.emergency();
                 }
             }
-            Command::Remote { .. } => {}
+            Command::Remote { .. } | Command::HideAfterEdgeReturn { .. } => {}
         }
     }
 
@@ -339,6 +346,7 @@ impl TapState {
 
     fn emergency(&mut self) {
         self.local();
+        self.idle_cursor.show();
         self.stopped_generation = self.generation;
         self.shortcuts.send_modify(|signal| {
             signal.stop = signal.stop.wrapping_add(1);
@@ -385,6 +393,9 @@ impl TapState {
             self.local();
         }
         let kind = event.get_type();
+        if !matches!(kind, ScrollWheel) || event.get_integer_value_field(MOMENTUM_PHASE) == 0 {
+            self.idle_cursor.show();
+        }
         match kind {
             KeyDown | KeyUp | FlagsChanged => {
                 activity(&self.shortcuts);
@@ -443,7 +454,6 @@ impl TapState {
             }
             ScrollWheel => {
                 // Quartz can continue to emit momentum events after fingers leave the trackpad.
-                const MOMENTUM_PHASE: u32 = 123;
                 if event.get_integer_value_field(MOMENTUM_PHASE) == 0 {
                     activity(&self.shortcuts);
                 }
@@ -643,6 +653,32 @@ mod tests {
             let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
             let _ = CGDisplay::warp_mouse_cursor_position(self.0);
         }
+    }
+
+    #[test]
+    #[ignore = "requires Accessibility and a stationary mouse on the desktop"]
+    fn receiver_cursor_hides_until_the_next_handoff() {
+        use super::super::macos_cursor::is_visible;
+        use unikvm_core::geometry::Edge;
+
+        assert!(is_visible());
+        let edge = EdgeLayout::primary(Edge::Right).unwrap();
+        let capture = super::super::Capture::with_edge(true, Some(edge)).unwrap();
+        let activity = capture.shortcuts.borrow().activity;
+        capture.control().hide_after_edge_return(activity);
+        let wait_for_visibility = |visible| {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            while is_visible() != visible {
+                assert!(
+                    Instant::now() < deadline,
+                    "cursor visibility did not change"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for_visibility(false);
+        capture.control().show_idle_cursor();
+        wait_for_visibility(true);
     }
 
     #[test]

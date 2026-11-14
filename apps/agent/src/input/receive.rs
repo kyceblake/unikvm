@@ -7,7 +7,7 @@ use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
 use unikvm_core::input::InputEvent;
 use unikvm_network::identity::Fingerprint;
-use unikvm_platform::input::{EdgeLayout, InputSink, MotionPacer, Shortcut};
+use unikvm_platform::input::{CaptureControl, EdgeLayout, InputSink, MotionPacer, Shortcut};
 use unikvm_protocol::input::{
     self, DENY, EDGE_REQUEST, Frame, GRANT, HEARTBEAT_ACK, LEASE, REQUEST,
 };
@@ -17,6 +17,7 @@ use super::Focus;
 const ADMISSION_TIMEOUT: Duration = Duration::from_millis(750);
 
 pub async fn run(
+    control: CaptureControl,
     mut signals: watch::Receiver<Shortcut>,
     mut connections: watch::Receiver<Option<quinn::Connection>>,
     peer: Fingerprint,
@@ -37,13 +38,23 @@ pub async fn run(
                 peer: peer.device_id(),
                 id: SessionId(session_id),
             };
-            let result = receive(&mut send, &mut recv, state, session, &mut signals, edge).await;
+            let result = receive(
+                &mut send,
+                &mut recv,
+                state,
+                session,
+                &mut signals,
+                edge,
+                &control,
+            )
+            .await;
             let _ = send.finish();
             let _ = recv.stop(0u32.into());
             if let Err(error) = result {
                 warn!(%error, "incoming input session ended");
             }
         }
+        control.show_idle_cursor();
         let closed = connection.stable_id();
         if connections
             .wait_for(|current| {
@@ -67,6 +78,7 @@ async fn receive(
     session: ControlSession,
     signals: &mut watch::Receiver<Shortcut>,
     edge: Option<EdgeLayout>,
+    control: &CaptureControl,
 ) -> Result<()> {
     let mut request = [0; REQUEST.len()];
     let admission = Instant::now() + ADMISSION_TIMEOUT;
@@ -110,6 +122,7 @@ async fn receive(
         }
     };
 
+    control.show_idle_cursor();
     let result = tokio::select! {
         biased;
         local = wait_local(signals, baseline) => local.map(|()| (true, None)),
@@ -130,6 +143,7 @@ async fn receive(
         )
         .await
         .context("report return across display edge")??;
+        control.hide_after_edge_return(baseline);
         info!("peer input returned across the display edge");
     } else if local {
         focus.transition(FocusEvent::LocalActivity);

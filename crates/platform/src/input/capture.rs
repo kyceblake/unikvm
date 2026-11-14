@@ -12,14 +12,23 @@ use unikvm_core::input::{ButtonState, InputEvent};
 use super::EdgeLayout;
 #[cfg(target_os = "macos")]
 use super::macos_capture::run_tap as run_monitor;
+#[cfg(target_os = "macos")]
+use super::macos_cursor::BackgroundCursor;
 #[cfg(target_os = "windows")]
 use super::windows::run_hooks as run_monitor;
+#[cfg(target_os = "windows")]
+use super::windows_cursor::ParkedCursor;
 
 const QUEUE_SIZE: usize = 256;
 pub(super) const POLL: Duration = Duration::from_millis(20);
 pub(super) const ARM_DELAY: Duration = Duration::from_secs(3);
 
 pub(super) type MonitorWake = Box<dyn Fn() + Send + Sync>;
+
+#[cfg(target_os = "macos")]
+type IdleCursorGuard = BackgroundCursor;
+#[cfg(target_os = "windows")]
+type IdleCursorGuard = ParkedCursor;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Shortcut {
@@ -41,11 +50,19 @@ pub(super) enum Command {
         expires: Instant,
         edge: bool,
     },
+    HideAfterEdgeReturn {
+        activity: u64,
+    },
+}
+
+#[derive(Clone)]
+pub struct CaptureControl {
+    commands: watch::Sender<Command>,
+    wake: Arc<MonitorWake>,
 }
 
 pub struct Capture {
-    commands: watch::Sender<Command>,
-    wake: MonitorWake,
+    control: CaptureControl,
     pub shortcuts: watch::Receiver<Shortcut>,
     pub events: mpsc::Receiver<InputEvent>,
     worker: Option<JoinHandle<()>>,
@@ -84,8 +101,10 @@ impl Capture {
             })?;
         let wake = ready.recv().map_err(io::Error::other)??;
         Ok(Self {
-            commands,
-            wake,
+            control: CaptureControl {
+                commands,
+                wake: Arc::new(wake),
+            },
             shortcuts,
             events: input,
             worker: Some(worker),
@@ -93,34 +112,96 @@ impl Capture {
         })
     }
 
+    pub fn control(&self) -> &CaptureControl {
+        &self.control
+    }
+
     pub fn renew(&self, generation: u64, expires: Instant) {
         self.renew_session(generation, expires, false);
     }
 
     pub fn renew_session(&self, generation: u64, expires: Instant, edge: bool) {
-        let wake = !matches!(*self.commands.borrow(), Command::Remote { generation: current, .. } if current == generation);
-        self.commands.send_replace(Command::Remote {
+        let previous = self.control.commands.send_replace(Command::Remote {
             generation,
             expires,
             edge,
         });
-        if wake {
-            (self.wake)();
+        if !matches!(previous, Command::Remote { generation: current, .. } if current == generation)
+        {
+            (self.control.wake)();
         }
     }
 
     pub fn local(&self) {
-        self.commands.send_replace(Command::Local {
+        self.control.commands.send_replace(Command::Local {
             return_height: None,
         });
-        (self.wake)();
+        (self.control.wake)();
     }
 
     pub fn return_from_edge(&self, height: u16) {
-        self.commands.send_replace(Command::Local {
+        self.control.commands.send_replace(Command::Local {
             return_height: Some(height),
         });
-        (self.wake)();
+        (self.control.wake)();
+    }
+}
+
+impl CaptureControl {
+    pub fn hide_after_edge_return(&self, activity: u64) {
+        if self.commands.send_if_modified(|command| {
+            if matches!(command, Command::Remote { .. }) {
+                return false;
+            }
+            *command = Command::HideAfterEdgeReturn { activity };
+            true
+        }) {
+            (self.wake)();
+        }
+    }
+
+    /// Reveal a parked receiving cursor without interrupting outgoing capture.
+    pub fn show_idle_cursor(&self) {
+        if self.commands.send_if_modified(|command| {
+            if !matches!(command, Command::HideAfterEdgeReturn { .. }) {
+                return false;
+            }
+            *command = Command::Local {
+                return_height: None,
+            };
+            true
+        }) {
+            (self.wake)();
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct IdleCursor(Option<IdleCursorGuard>);
+
+impl IdleCursor {
+    pub(super) fn update(
+        &mut self,
+        commands: &mut watch::Receiver<Command>,
+        signals: &watch::Sender<Shortcut>,
+    ) {
+        if !commands.has_changed().unwrap_or(true) {
+            return;
+        }
+        let command = *commands.borrow_and_update();
+        let should_hide = matches!(
+            command,
+            Command::HideAfterEdgeReturn { activity } if signals.borrow().activity == activity
+        );
+        if !should_hide {
+            self.show();
+        } else if self.0.is_none() {
+            self.0 = IdleCursorGuard::hide_idle().ok();
+        }
+    }
+
+    pub(super) fn show(&mut self) {
+        self.0 = None;
     }
 }
 

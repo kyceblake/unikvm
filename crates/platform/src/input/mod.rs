@@ -32,7 +32,7 @@ mod windows_raw_mouse;
 mod windows_sink;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use capture::{Capture, Shortcut};
+pub use capture::{Capture, CaptureControl, Shortcut};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use edge::EdgeLayout;
 #[cfg(target_os = "macos")]

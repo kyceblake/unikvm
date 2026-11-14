@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Hide the receiver's cursor on edge return
+
+- The operator reported that when the Windows mouse crossed back to Windows, the Mac continued to show its cursor at the edge.
+- A successful edge return now parks and hides the receiving cursor. Physical input, the next incoming handoff, or peer disconnection restores it. The native monitor also releases the hide when it stops or loses access to the desktop.
+- The Windows workspace checks, six native desktop tests, and input probe passed. Apple Silicon and x86-64 Linux passed cross-target Clippy. The macOS visibility regression needs a logged-in Mac with Accessibility access.
+- Next, repeat the Windows-mouse round trip on the paired desktops and touch the Mac trackpad after returning to confirm the Mac pointer reappears.
+
 ## 2026-11-14 — Lower-latency edge handoff and cursor visibility
 
 - Send the first heartbeat with the edge request to remove a separate network round trip. Capture still starts after a matching grant and fresh acknowledgment. Initialize display pacing once the cursor is on the receiving display.

@@ -27,6 +27,10 @@ pub(super) struct ParkedCursor {
 }
 
 impl ParkedCursor {
+    pub(super) fn hide_idle() -> io::Result<Self> {
+        Self::hide(desktop_cursor()?.ptScreenPos)
+    }
+
     pub(super) fn hide(anchor: POINT) -> io::Result<Self> {
         let class: Vec<_> = "unikvm parked cursor".encode_utf16().chain([0]).collect();
         let previous = desktop_cursor()?.hCursor;
@@ -165,18 +169,8 @@ mod tests {
         });
         // SAFETY: These queries borrow the current foreground window handle.
         let foreground = unsafe { GetForegroundWindow() };
-        // SAFETY: The desktop point and window handle are read-only arguments.
-        let underlying = unsafe { WindowFromPhysicalPoint(before.ptScreenPos) };
         capture.renew_session(1, Instant::now() + Duration::from_secs(2), true);
-        let cursor = wait_for(|| {
-            // SAFETY: Hit test and query the class cursor of the window at the anchor.
-            let window = unsafe { WindowFromPhysicalPoint(before.ptScreenPos) };
-            if window.is_null() || window == underlying {
-                return None;
-            }
-            let blank = unsafe { GetClassLongPtrW(window, GCLP_HCURSOR) } as HCURSOR;
-            (!blank.is_null() && desktop_cursor().unwrap().hCursor == blank).then_some(blank)
-        });
+        let cursor = wait_for(|| blank_at(before.ptScreenPos));
         assert_eq!(unsafe { GetForegroundWindow() }, foreground);
         let height = u16::MAX / 4;
         capture.return_from_edge(height);
@@ -207,5 +201,40 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop and a stationary mouse"]
+    fn receiver_cursor_hides_until_the_next_handoff() {
+        super::super::windows::check_input_desktop().unwrap();
+        let edge = super::super::EdgeLayout::primary(Edge::Left).unwrap();
+        let capture = super::super::Capture::with_edge(true, Some(edge)).unwrap();
+        let position = desktop_cursor().unwrap().ptScreenPos;
+        // SAFETY: Refresh the normal cursor at its existing screen coordinates.
+        assert_ne!(unsafe { SetPhysicalCursorPos(position.x, position.y) }, 0);
+        wait_for(|| (!desktop_cursor().unwrap().hCursor.is_null()).then_some(()));
+        let activity = capture.shortcuts.borrow().activity;
+        capture.control().hide_after_edge_return(activity);
+        let blank = wait_for(|| blank_at(position));
+        capture.control().show_idle_cursor();
+        wait_for(|| {
+            let cursor = desktop_cursor().unwrap().hCursor;
+            (!cursor.is_null() && cursor != blank).then_some(())
+        });
+    }
+
+    fn blank_at(position: POINT) -> Option<HCURSOR> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
+
+        let mut class = [0; 64];
+        // SAFETY: Win32 writes at most the provided class name buffer length.
+        let window = unsafe { WindowFromPhysicalPoint(position) };
+        let len = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+        if len <= 0 || String::from_utf16_lossy(&class[..len as usize]) != "unikvm parked cursor" {
+            return None;
+        }
+        // SAFETY: The hit-tested window handle is borrowed for the class lookup.
+        let cursor = unsafe { GetClassLongPtrW(window, GCLP_HCURSOR) } as HCURSOR;
+        (!cursor.is_null() && desktop_cursor().unwrap().hCursor == cursor).then_some(cursor)
     }
 }

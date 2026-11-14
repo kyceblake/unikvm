@@ -68,6 +68,7 @@ impl Control {
             }
             InputMode::Receive => {
                 receive::run(
+                    capture.control().clone(),
                     capture.shortcuts.clone(),
                     self.connections,
                     self.peer,
@@ -77,10 +78,11 @@ impl Control {
                 .await
             }
             InputMode::Bidirectional => {
+                let control = capture.control().clone();
                 let signals = capture.shortcuts.clone();
                 tokio::select! {
                     result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, edge.map(|edge| edge.side)) => result,
-                    result = receive::run(signals, self.connections, self.peer, &focus, edge) => result,
+                    result = receive::run(control, signals, self.connections, self.peer, &focus, edge) => result,
                 }
             }
         }
