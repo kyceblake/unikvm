@@ -5,19 +5,50 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::time::timeout;
 use tracing::{debug, info};
+use unikvm_config::NetworkConfig;
+use unikvm_network::PeerEvent;
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
 use unikvm_protocol::local::{Status, respond};
 
-pub async fn run() -> Result<()> {
+pub async fn run(config: Option<&NetworkConfig>) -> Result<()> {
     let started = Instant::now();
     let pid = process::id();
     let shutdown = tokio::spawn(shutdown_signal());
-    tokio::pin!(shutdown);
     let mut listener = Endpoint::for_current_user()?
         .listen()
         .context("open local agent endpoint")?;
+    let network = config.map(crate::peer::bind).transpose()?;
+    let peer_service = network.map(|endpoint| {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(endpoint.run_until(
+            async {
+                let _ = stopped.await;
+            },
+            |event| match event {
+                PeerEvent::Connected(peer) => info!(%peer, "authenticated peer connected"),
+                PeerEvent::Disconnected(peer) => info!(%peer, "peer disconnected"),
+            },
+        ));
+        (stop, worker)
+    });
     info!(pid, "local agent ready");
 
+    let local = serve(&mut listener, shutdown, pid, started).await;
+    if let Some((stop, worker)) = peer_service {
+        let _ = stop.send(());
+        worker.await.context("join peer transport task")?;
+    }
+    local?;
+    info!("local agent stopped");
+    Ok(())
+}
+
+async fn serve(
+    listener: &mut unikvm_platform::local::Listener,
+    mut shutdown: tokio::task::JoinHandle<io::Result<()>>,
+    pid: u32,
+    started: Instant,
+) -> Result<()> {
     loop {
         let stream = tokio::select! {
             signal = &mut shutdown => {
@@ -45,7 +76,6 @@ pub async fn run() -> Result<()> {
         }
         listener.finish().context("close local status exchange")?;
     }
-    info!("local agent stopped");
     Ok(())
 }
 

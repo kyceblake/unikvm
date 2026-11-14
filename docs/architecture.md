@@ -1,18 +1,19 @@
 # Architecture
 
-Each installation runs a headless user-session agent. When peer networking is available, every agent will listen for and initiate direct connections. The CLI and future TUI are local clients and may exit independently of the agent. Other agents will continue operating when a peer goes offline.
+Each installation runs a headless user-session agent. Opt-in networking gives each agent one QUIC endpoint capable of accepting and initiating direct connections. For the first milestone the agents configure exactly one peer, and the lower certificate fingerprint initiates the connection. The CLI and future TUI are local clients and may exit independently of the agent.
 
 ## Workspace boundaries
 
 | Component | Responsibility |
 | --- | --- |
-| `apps/agent` | Starts the local endpoint, serves status, reads configuration, sets up tracing, and owns shutdown. |
-| `apps/cli` | Queries local agent status and renders its PID and uptime. |
+| `apps/agent` | Starts local status IPC and optional peer networking, reads configuration, sets up tracing, and owns shutdown. |
+| `apps/cli` | Queries local agent status, provisions an identity, exports its public certificate, and verifies peer fingerprints. |
 | `core` | OS-independent device IDs, peer and monitor types, events, display geometry, and focus transitions. |
-| `protocol` | Versioned local status frames. The future LAN wire schema belongs here. |
-| `platform` | Native IPC and stand-alone input experiments. Native handle types stay inside this boundary and its application callers. |
+| `protocol` | Versioned local status frames and peer protocol identifiers. |
+| `platform` | Native IPC, credential storage, and stand-alone input experiments. Native handle types stay inside this boundary and its application callers. |
 | `config` | TOML schema, defaults, and validation. |
-| `network`, `clipboard`, `transfer` | Crate boundaries for discovery and authenticated peers, clipboard synchronization, and approved transfers. |
+| `network` | Certificate identity, peer verification, and QUIC connection lifecycle. |
+| `clipboard`, `transfer` | Crate boundaries for clipboard synchronization and approved transfers. |
 
 The platform input interfaces planned for backend implementation are `InputCapture`, `InputSink`, `HotkeyBackend`, `DisplayProvider`, `ClipboardBackend`, `ApprovalPrompt`, and `CredentialStore`. Define their contracts against working native paths as each phase needs them. The probe has no dependency on the agent.
 

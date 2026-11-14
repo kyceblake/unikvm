@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — First Phase 2 networking slice
+
+- Pulled the macOS IPC fix at `af268b0`. GitHub CI passed on Windows, macOS, and Linux for that revision.
+- Added manually configured two-device connections with mutual TLS 1.3, persistent Ed25519 identities, bilateral SHA-256 fingerprint approval, and automatic reconnect. One certificate per peer and the local config keep trust explicit across restarts.
+- Windows GNU passed formatting, strict Clippy, all 22 workspace tests, and build. Cross-target Clippy passed for Apple Silicon macOS and x86-64 Linux. Loopback tests covered both connection directions, unknown client and server rejection, and automatic reconnect after the listener restarted at the same address. A Windows CLI/agent smoke test verified identity creation, export, mismatched fingerprint rejection, and local status with networking enabled. Cargo deny and the cached RustSec audit passed with duplicate transitive version warnings from cargo deny.
+- The new networking code still needs macOS and Linux runtime verification. Next, run the [manual pairing walkthrough](manual-pairing.md) between Windows and macOS, including stopping and restarting either machine's agent. Then add mDNS discovery, multiple trusted peers, and a three-agent continuity test. Keyboard and mouse control remains a later milestone.
+
 ## 2026-11-14 — macOS local IPC recovery
 
 - Fixed the Unix listener terminating when macOS reports `NotConnected` during peer credential lookup for a client that closed before accept. The listener discards the socket and continues; unverified streams are never served.

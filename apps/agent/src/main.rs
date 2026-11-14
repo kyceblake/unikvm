@@ -1,3 +1,4 @@
+mod peer;
 mod service;
 
 use std::env;
@@ -52,5 +53,5 @@ fn run() -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(service::run())
+        .block_on(service::run(config.network.as_ref()))
 }

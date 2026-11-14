@@ -6,6 +6,12 @@ The current agent exposes one read-only health/status query over native local IP
 - Linux and macOS use a socket in a user-owned mode-0700 directory. Both endpoints compare effective user IDs using native peer credentials. A lock serializes binding, stale socket removal, and shutdown cleanup. The fallback under `/tmp` can be precreated by another local user, resulting in a startup failure. The ownership check fails closed. [Tokio peer credential implementation](https://docs.rs/tokio/latest/src/tokio/net/unix/ucred.rs.html)
 - The agent bounds each exchange by time and frame size. A stalled local client can delay other local requests for up to one exchange deadline per connection. Processes with the same user or logon rights and OS administrators are inside the local trust boundary.
 
+## Manual peer trust
+
+The opt-in QUIC endpoint uses TLS 1.3 and requires client certificates. On each machine the configured SHA-256 fingerprint must match the imported public certificate. Rustls validates both sides against the configured certificate, and the application requires an exact match of the presented leaf before exchanging readiness frames. TLS resumption is disabled so a reconnect presents certificates again. The source IP filter limits incoming attempts. The certificate identifies the peer.
+
+Installation identities use self-signed Ed25519 certificates. The device ID is the first 128 bits of the certificate digest. Trust uses the entire SHA-256 fingerprint. Windows protects the private identity file using current-user DPAPI. macOS and Linux use an owned file with mode 0600 or stricter. macOS Keychain and Linux Secret Service integration are future work. Use a directory that only the account owner can modify.
+
 ## LAN requirements for later phases
 
 Treat mDNS, IP addresses, hostnames, and advertised IDs as untrusted hints. Pairing requires explicit approval and verification of both peer identities using a reviewed certificate fingerprint workflow or vetted PAKE. Bind a persistent random device ID to the verified certificate identity. Reconnect only against pinned trust and support revocation. Give input, clipboard, and file receipt separate permissions.

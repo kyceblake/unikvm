@@ -1,8 +1,8 @@
 # unikvm
 
-unikvm is a Rust 2024 workspace for a peer-to-peer software KVM. The current milestone provides a standalone Windows input feasibility probe and a headless agent with local status IPC.
+unikvm is a Rust 2024 workspace for a peer-to-peer software KVM. The headless agent provides local status IPC and an opt-in, authenticated QUIC connection for a manually configured peer. The Windows input feasibility probe runs independently.
 
-Install Rust with [rustup](https://rustup.rs/) and use the platform's native linker. On Windows, the default MSVC toolchain requires Visual Studio Build Tools with **Desktop development with C++**. The GNU toolchain requires a compatible MinGW binutils on `PATH`.
+Install Rust with [rustup](https://rustup.rs/) and use the platform's native C toolchain. On macOS, install Apple's Command Line Tools with `xcode-select --install`. On Windows, the default MSVC toolchain requires Visual Studio Build Tools with **Desktop development with C++**. The GNU toolchain requires a compatible MinGW C compiler and binutils.
 
 From the workspace root, build and launch the agent in one terminal.
 
@@ -26,4 +26,4 @@ schema_version = 1
 log_level = "info"
 ```
 
-See [progress and verification](docs/progress.md), [architecture](docs/architecture.md), [platform support and probe commands](docs/platform-support.md), and [dependency decisions](docs/dependencies.md).
+For two-device networking, follow [manual pairing](docs/manual-pairing.md). See [progress and verification](docs/progress.md), [architecture](docs/architecture.md), [platform support and probe commands](docs/platform-support.md), and [dependency decisions](docs/dependencies.md).

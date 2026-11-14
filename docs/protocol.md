@@ -6,6 +6,10 @@ The client sends the 16-byte ASCII frame `UNIKVM/1 STATUS\n`. The agent replies 
 
 One exchange is allowed per connection. Invalid, truncated, or unsupported frames fail the exchange. On the client the two-second deadline covers connect and exchange. On the agent it starts after accepting the connection.
 
+## Peer readiness, version 1
+
+QUIC uses TLS 1.3 with mutual certificate authentication and ALPN `unikvm/1`. After verifying the peer's exact certificate, each endpoint opens one unidirectional stream, sends the five-byte ASCII frame `READY`, and finishes the stream. Each endpoint accepts the connection for application use after it has read the complete matching frame. The readiness exchange shares a five-second deadline with the TLS handshake.
+
 ## LAN protocol direction
 
 The future protobuf schema will negotiate a protocol version and capabilities, validate inbound data, and frame control messages on bounded reliable QUIC streams. File contents will use dedicated streams. Evaluate datagrams for sequenced mouse motion after profiling the coalesced reliable path. Key and button releases require reliable delivery and local cleanup on control loss.

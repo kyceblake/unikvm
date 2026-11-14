@@ -1,1 +1,7 @@
-//! Reserved for peer discovery, identity verification, and authenticated connections.
+//! Persistent certificate identities and authenticated peer transport.
+
+mod transport;
+
+pub mod identity;
+
+pub use transport::{BindError, PeerEndpoint, PeerEvent};

@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 unikvm-config.workspace = true
+unikvm-network.workspace = true
 unikvm-platform.workspace = true
 unikvm-protocol.workspace = true
 tokio.workspace = true

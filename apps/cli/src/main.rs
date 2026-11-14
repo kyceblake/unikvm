@@ -1,3 +1,5 @@
+mod identity;
+
 use std::env;
 use std::process::ExitCode;
 
@@ -5,6 +7,8 @@ use anyhow::{Context, Result, bail};
 use tokio::time::timeout;
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
 use unikvm_protocol::local::{Status, query};
+
+use crate::identity::{USAGE, identity_command, verify_command};
 
 fn main() -> ExitCode {
     if let Err(error) = run() {
@@ -17,16 +21,15 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let mut args = env::args_os().skip(1);
     let command = args.next();
-    if args.next().is_some() {
-        bail!("usage: unikvm status");
-    }
     match command.as_deref().and_then(|arg| arg.to_str()) {
-        Some("status") => {}
-        Some("-h" | "--help") => {
-            println!("Usage: unikvm status");
+        Some("status") if args.next().is_none() => {}
+        Some("identity") => return identity_command(args),
+        Some("peer") => return verify_command(args),
+        Some("-h" | "--help") if args.next().is_none() => {
+            println!("{USAGE}");
             return Ok(());
         }
-        _ => bail!("usage: unikvm status"),
+        _ => bail!(USAGE),
     }
 
     let status = tokio::runtime::Builder::new_current_thread()

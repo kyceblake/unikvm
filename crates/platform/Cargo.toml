@@ -9,7 +9,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tempfile.workspace = true
 tokio.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
@@ -17,6 +19,7 @@ rustix = { workspace = true, features = ["fs", "process"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Threading",
 ] }

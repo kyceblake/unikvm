@@ -18,13 +18,23 @@ Reviewed 2026-11-14. Rust 1.100.0 is the current stable release and is pinned fo
 
 Tokio's fixed buffers, timers and local transports cover the status path. On Windows, Microsoft bindings expose explicit pipe security attributes and Win32 probe APIs. On Unix, Tokio provides peer credentials and rustix supplies the current effective UID. [Tokio named pipe server](https://docs.rs/tokio/latest/tokio/net/windows/named_pipe/struct.ServerOptions.html), [Tokio Unix peer credentials](https://docs.rs/tokio/latest/src/tokio/net/unix/ucred.rs.html), [rustix effective UID](https://docs.rs/rustix/latest/rustix/process/fn.geteuid.html)
 
+## Adopted for manual peer networking
+
+| Crate | Stable release | Declared MSRV | License | Published | Decision |
+| --- | --- | --- | --- | --- | --- |
+| [quinn](https://crates.io/crates/quinn) | 0.11.12 | 1.85 | MIT OR Apache-2.0 | 2026-09-14 | Tokio UDP transport with one endpoint for dialing and listening. |
+| [rustls](https://crates.io/crates/rustls) | 0.23.46 | 1.71 | Apache-2.0 OR ISC OR MIT | 2026-10-14 | TLS 1.3, standard WebPKI verification in both roles, and disabled resumption. |
+| [rcgen](https://crates.io/crates/rcgen) | 0.14.10 | 1.88 | MIT OR Apache-2.0 | 2026-08-28 | Generate Ed25519 certificates for client and server authentication. |
+| [ring](https://crates.io/crates/ring) | 0.17.14 | 1.66 | Apache-2.0 AND ISC | 2025-03-11 | Shared cryptography provider for Quinn, Rustls, and rcgen. Reuse its SHA-256 implementation for fingerprints. |
+| [tempfile](https://crates.io/crates/tempfile) | 3.27.0 | 1.63 | MIT OR Apache-2.0 | 2026-03-11 | Stage the identity locally and persist it without replacing an existing identity. |
+| [zeroize](https://crates.io/crates/zeroize) | 1.9.1 | 1.85 | Apache-2.0 OR MIT | 2026-10-06 | Clear serialized private key material and DPAPI plaintext buffers after use. |
+
+Use one crypto provider to limit the dependency and native build surface. The dependency license check now includes ISC and BSD-3-Clause for the reviewed crypto stack. Windows identity files use DPAPI through the existing Windows bindings. [Quinn endpoint](https://docs.rs/quinn/0.11.12/quinn/struct.Endpoint.html), [Rustls client certificate verifier](https://docs.rs/rustls/0.23.46/rustls/server/struct.WebPkiClientVerifier.html), [tempfile identity persistence primitive](https://docs.rs/tempfile/3.27.0/tempfile/struct.NamedTempFile.html#method.persist_noclobber), [Windows DPAPI](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |
 | --- | --- | --- | --- | --- | --- |
-| [quinn](https://crates.io/crates/quinn) | 0.11.12 | 1.85 | MIT OR Apache-2.0 | 2026-09-14 | One QUIC endpoint can accept and dial, with streams and Rustls integration. |
-| [rustls](https://crates.io/crates/rustls) | 0.23.46 | 1.71 | Apache-2.0 OR ISC OR MIT | 2026-10-14 | TLS 1.3. Review client and server certificate verifier paths before implementing pairing. |
-| [rcgen](https://crates.io/crates/rcgen) | 0.14.10 | 1.88 | MIT OR Apache-2.0 | 2026-08-28 | Candidate for generating installation TLS certificates with a supported signature algorithm. |
 | [ed25519-dalek](https://crates.io/crates/ed25519-dalek) | 3.0.0 | 1.85 | BSD-3-Clause | 2026-07-06 | Consider only if a separately justified signing role remains after selecting certificate identity. |
 | [mdns-sd](https://crates.io/crates/mdns-sd) | 0.21.7 | 1.71 | Apache-2.0 OR MIT | 2026-11-02 | Register and browse DNS-SD records. Verify dual-stack address handling and interface changes. |
 | [prost](https://crates.io/crates/prost) | 0.14.6 | 1.85 | Apache-2.0 | 2026-11-12 | Versioned protobuf LAN messages. Decide how to provide protoc reproducibly when introducing schema generation. |
