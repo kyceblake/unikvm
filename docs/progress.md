@@ -1,11 +1,19 @@
 # Progress
 
+## 2026-11-14 — Phase 4 HTML clipboard sync
+
+- Added optional HTML alongside the plain-text representation under the same revision. Both representations are limited to 64 KiB each. Both agents need clipboard protocol version 2.
+- Windows publishes HTML Format with UTF-8 byte offsets and transfers the selected fragment. macOS reads and writes HTML and plain text on the same pasteboard item. Both retain privacy markers and echo suppression. [Microsoft HTML Clipboard Format](https://learn.microsoft.com/en-us/windows/win32/dataxchg/html-clipboard-format), [Apple pasteboard items](https://developer.apple.com/documentation/appkit/nspasteboarditem)
+- Windows formatting, strict Clippy, build, 56 workspace tests, and the native clipboard regression passed. Linux cross-target Clippy passed. Windows returned access denied while starting the compiler for the Apple Silicon AppKit dependencies.
+- Next, update both agents and verify browser-to-editor rich-text and plain-text paste in both directions on the paired desktops.
+
 ## 2026-11-14 — Phase 4 native clipboard sync
 
 - Added a separate `[clipboard]` opt-in for one pinned peer on Windows and macOS. A versioned readiness exchange lets two enabled agents share new text without sending whatever was on the clipboard at startup.
 - Native adapters track clipboard ownership changes, skip supported sensitive-content markers, and mark imported text to avoid echo. The clipboard worker stays independent of keyboard and mouse handoff. See the [clipboard setup and paired test](clipboard-sync.md).
 - Windows formatting, strict Clippy, build, and 53 workspace tests passed, including a bidirectional transfer near the 64 KiB limit over an authenticated loopback connection. The native Windows regression verified Unicode clipboard writes, suppression of received text, and rejection of a stale write. Linux cross-target Clippy and Cargo deny passed. The Apple Silicon cross-check was blocked by a Windows access-denied error when compiling the new AppKit dependencies.
-- Next, build on a logged-in Mac, enable clipboard sync on both machines, and verify live copy/paste in both directions.
+- The operator confirmed live plain-text copy and paste in both directions between Windows and macOS. The Windows log also confirmed that clipboard sessions re-established after peer reconnects.
+- Next, verify repeated copy/paste after reconnect, simultaneous copies, and the one-sided opt-in case on the paired desktops before expanding clipboard formats.
 
 ## 2026-11-14 — Phase 4 plain-text clipboard foundation
 

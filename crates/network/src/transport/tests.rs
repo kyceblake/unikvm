@@ -351,7 +351,9 @@ async fn either_authenticated_endpoint_can_open_an_input_stream() {
 #[tokio::test]
 async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authenticated_link() {
     use std::num::NonZeroU64;
-    use unikvm_protocol::clipboard::{self, MAX_TEXT_BYTES, READY, Revision, TextUpdate};
+    use unikvm_protocol::clipboard::{
+        self, MAX_HTML_BYTES, MAX_TEXT_BYTES, READY, Revision, TextUpdate,
+    };
 
     let [a_addr, b_addr] = addresses();
     let a = Identity::generate().unwrap();
@@ -383,7 +385,8 @@ async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authentic
             counter: NonZeroU64::MIN,
             origin,
         };
-        let update = TextUpdate::new(revision, text).unwrap();
+        let html = format!("<b>{}</b>", "あ".repeat((MAX_HTML_BYTES - 7) / 3));
+        let update = TextUpdate::with_html(revision, text, Some(html)).unwrap();
         let (sent, received) = tokio::join!(
             clipboard::write(&mut send, &update),
             clipboard::read(&mut recv),
@@ -392,6 +395,7 @@ async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authentic
         let received = received.unwrap();
         assert_eq!(received.revision().origin, expected);
         assert!(received.text() == update.text());
+        assert!(received.html() == update.html());
     };
     let a_id = a.fingerprint().device_id();
     let b_id = b.fingerprint().device_id();

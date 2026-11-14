@@ -21,7 +21,7 @@ mod sync {
     use unikvm_clipboard::Revisions;
     use unikvm_core::device::DeviceId;
     use unikvm_platform::clipboard::{Clipboard, WriteOutcome};
-    use unikvm_protocol::clipboard::{self, MAX_TEXT_BYTES, READY, TextUpdate};
+    use unikvm_protocol::clipboard::{self, MAX_HTML_BYTES, MAX_TEXT_BYTES, READY, TextUpdate};
 
     use super::{ClipboardConfig, PeerEndpoint};
 
@@ -120,7 +120,7 @@ mod sync {
         .await
         .context("clipboard peer did not enable sync")??;
         let sequence = os.sequence()?;
-        info!("clipboard text sync connected");
+        info!("clipboard sync connected");
         let (updates, outgoing) = watch::channel(None);
         tokio::try_join!(
             send_updates(send, outgoing),
@@ -144,7 +144,7 @@ mod sync {
             if let Some(update) = update {
                 timeout(HANDSHAKE_TIMEOUT, clipboard::write(&mut send, &update))
                     .await
-                    .context("clipboard text write timed out")??;
+                    .context("clipboard update write timed out")??;
             }
         }
         Ok(())
@@ -191,7 +191,7 @@ mod sync {
                     }
                     // Observe a local change before applying any peer update.
                     // Busy native clipboards are retried on the next tick.
-                    if let Ok(snapshot) = os.read(sequence, MAX_TEXT_BYTES) {
+                    if let Ok(snapshot) = os.read(sequence, MAX_TEXT_BYTES, MAX_HTML_BYTES) {
                         if let Some(snapshot) = snapshot {
                             sequence = snapshot.sequence;
                             if !os.available() {
@@ -201,8 +201,10 @@ mod sync {
                             } else if let Some(text) = snapshot.text
                                 && !text.contains('\0')
                             {
-                                outgoing
-                                    .send_replace(Some(Arc::new(revisions.local_change(text)?)));
+                                let html = snapshot.html.filter(|html| !html.contains('\0'));
+                                outgoing.send_replace(Some(Arc::new(
+                                    revisions.local_change(text, html)?,
+                                )));
                             } else {
                                 outgoing.send_replace(None);
                                 pending = None;
@@ -213,7 +215,7 @@ mod sync {
                                 pending = None;
                             } else if os.available()
                                 && let Ok(WriteOutcome::Applied(applied)) =
-                                    os.write(sequence, update.text())
+                                    os.write(sequence, update.text(), update.html())
                             {
                                 sequence = applied;
                                 revisions.accept_remote(update);

@@ -5,8 +5,8 @@ use std::io;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::ProtocolObject;
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeString,
-    NSPasteboardWriting,
+    NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
+    NSPasteboardTypeString, NSPasteboardWriting,
 };
 use objc2_foundation::{NSArray, NSData, NSString};
 
@@ -42,40 +42,65 @@ impl Clipboard {
         autoreleasepool(|_| Ok(self.board.changeCount() as u64))
     }
 
-    pub fn read(&self, previous: u64, limit: usize) -> io::Result<Option<Snapshot>> {
+    pub fn read(
+        &self,
+        previous: u64,
+        text_limit: usize,
+        html_limit: usize,
+    ) -> io::Result<Option<Snapshot>> {
         autoreleasepool(|_| {
             let sequence = self.sequence()?;
             if sequence == previous {
                 return Ok(None);
             }
             // SAFETY: AppKit initializes these immutable exported type names.
-            let (text_type, file_type) =
-                unsafe { (NSPasteboardTypeString, NSPasteboardTypeFileURL) };
-            let text = self
-                .board
-                .types()
-                .filter(|types| {
-                    !types.containsObject(file_type)
-                        && !SKIP_TYPES
-                            .iter()
-                            .any(|name| types.containsObject(&NSString::from_str(name)))
-                        && types.containsObject(text_type)
-                })
-                .and_then(|_| self.board.dataForType(text_type))
-                .filter(|data| data.len() <= limit)
-                .and_then(|data| String::from_utf8(data.to_vec()).ok());
+            let (text_type, html_type, file_type) = unsafe {
+                (
+                    NSPasteboardTypeString,
+                    NSPasteboardTypeHTML,
+                    NSPasteboardTypeFileURL,
+                )
+            };
+            let types = self.board.types();
+            let eligible = types.as_ref().is_some_and(|types| {
+                !types.containsObject(file_type)
+                    && !SKIP_TYPES
+                        .iter()
+                        .any(|name| types.containsObject(&NSString::from_str(name)))
+                    && types.containsObject(text_type)
+            });
+            let item = eligible
+                .then(|| self.board.pasteboardItems())
+                .flatten()
+                .filter(|items| items.len() == 1)
+                .and_then(|items| items.firstObject());
+            let read = |kind, limit| {
+                item.as_ref()?
+                    .dataForType(kind)
+                    .filter(|data| data.len() <= limit)
+                    .and_then(|data| String::from_utf8(data.to_vec()).ok())
+            };
+            let text = read(text_type, text_limit);
+            let html = text.as_ref().and_then(|_| read(html_type, html_limit));
             // The type list and the contents must belong to the same item generation.
-            Ok((self.sequence()? == sequence).then_some(Snapshot { sequence, text }))
+            Ok((self.sequence()? == sequence).then_some(Snapshot {
+                sequence,
+                text,
+                html,
+            }))
         })
     }
 
-    pub fn write(&self, expected: u64, text: &str) -> io::Result<WriteOutcome> {
+    pub fn write(&self, expected: u64, text: &str, html: Option<&str>) -> io::Result<WriteOutcome> {
         autoreleasepool(|_| {
             let item = NSPasteboardItem::new();
             let data = NSData::with_bytes(text.as_bytes());
             // SAFETY: AppKit initializes this immutable exported type name.
-            let kind = unsafe { NSPasteboardTypeString };
-            if !item.setData_forType(&data, kind)
+            let (plain, rich) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeHTML) };
+            if let Some(html) = html {
+                let _ = item.setData_forType(&NSData::with_bytes(html.as_bytes()), rich);
+            }
+            if !item.setData_forType(&data, plain)
                 || !item.setData_forType(&NSData::with_bytes(&[]), &NSString::from_str(TRANSIENT))
             {
                 return Err(io::Error::other("could not prepare Mac pasteboard text"));
@@ -100,32 +125,47 @@ mod tests {
 
     #[test]
     #[ignore = "requires a logged-in macOS desktop"]
-    fn native_text_round_trip_uses_a_transient_marker_on_received_text() {
+    fn native_text_and_html_round_trip_uses_a_transient_marker_on_received_data() {
         autoreleasepool(|_| {
             let clipboard = Clipboard {
                 board: NSPasteboard::pasteboardWithUniqueName(),
             };
             let initial = clipboard.sequence().unwrap();
             let text = "日本語\n🧪";
+            let html = "<strong>日本語</strong><br>🧪";
             clipboard.board.clearContents();
             // SAFETY: AppKit initializes the immutable exported type name.
-            let kind = unsafe { NSPasteboardTypeString };
+            let (kind, rich) = unsafe { (NSPasteboardTypeString, NSPasteboardTypeHTML) };
             assert!(
                 clipboard
                     .board
                     .setString_forType(&NSString::from_str(text), kind)
             );
-            let snapshot = clipboard.read(initial, 64 * 1024).unwrap().unwrap();
+            assert!(
+                clipboard
+                    .board
+                    .setData_forType(Some(&NSData::with_bytes(html.as_bytes())), rich)
+            );
+            let snapshot = clipboard
+                .read(initial, 64 * 1024, 64 * 1024)
+                .unwrap()
+                .unwrap();
             assert!(snapshot.text.as_deref() == Some(text));
-            let WriteOutcome::Applied(_) = clipboard.write(snapshot.sequence, text).unwrap() else {
+            assert!(snapshot.html.as_deref() == Some(html));
+            let WriteOutcome::Applied(_) = clipboard
+                .write(snapshot.sequence, text, Some(html))
+                .unwrap()
+            else {
                 panic!("private pasteboard changed unexpectedly");
             };
             let snapshot = clipboard
-                .read(snapshot.sequence, 64 * 1024)
+                .read(snapshot.sequence, 64 * 1024, 64 * 1024)
                 .unwrap()
                 .unwrap();
             assert!(snapshot.text.is_none());
+            assert!(snapshot.html.is_none());
             assert!(clipboard.board.stringForType(kind).unwrap().to_string() == text);
+            assert!(clipboard.board.dataForType(rich).unwrap().to_vec() == html.as_bytes());
             clipboard.board.clearContents();
         });
     }

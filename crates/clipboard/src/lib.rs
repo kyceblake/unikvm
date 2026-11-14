@@ -25,7 +25,7 @@ impl Revisions {
 
     /// Record a physical or application clipboard change. Native notifications
     /// caused by applying a peer update are filtered before calling this.
-    pub fn local_change(&mut self, text: String) -> io::Result<TextUpdate> {
+    pub fn local_change(&mut self, text: String, html: Option<String>) -> io::Result<TextUpdate> {
         let counter = self.latest.map_or(0, |revision| revision.counter.get());
         let counter = counter
             .checked_add(1)
@@ -35,7 +35,7 @@ impl Revisions {
             counter,
             origin: self.local,
         };
-        let update = TextUpdate::new(revision, text)?;
+        let update = TextUpdate::with_html(revision, text, html)?;
         self.latest = Some(revision);
         Ok(update)
     }
@@ -67,13 +67,15 @@ mod tests {
     fn concurrent_updates_converge_and_replay_cannot_replace_newer_text() {
         let mut a = Revisions::new(A, B);
         let mut b = Revisions::new(B, A);
-        let from_a = a.local_change("first".into()).unwrap();
-        let from_b = b.local_change("second".into()).unwrap();
+        let from_a = a.local_change("first".into(), None).unwrap();
+        let from_b = b
+            .local_change("second".into(), Some("<b>second</b>".into()))
+            .unwrap();
         assert!(a.accept_remote(&from_b));
         assert!(!b.accept_remote(&from_a));
         assert!(!a.accept_remote(&from_b));
 
-        let follow_up = a.local_change("third".into()).unwrap();
+        let follow_up = a.local_change("third".into(), None).unwrap();
         assert!(follow_up.revision() > from_b.revision());
         assert!(b.accept_remote(&follow_up));
         assert!(!b.accept_remote(&from_a));
@@ -83,9 +85,9 @@ mod tests {
     #[test]
     fn rejects_updates_with_an_origin_other_than_the_pinned_peer() {
         let mut a = Revisions::new(A, B);
-        let local = a.local_change("original".into()).unwrap();
+        let local = a.local_change("original".into(), None).unwrap();
         let mut unrelated = Revisions::new(DeviceId([3; 16]), A);
-        let forged = unrelated.local_change("unrelated".into()).unwrap();
+        let forged = unrelated.local_change("unrelated".into(), None).unwrap();
         assert!(!a.accept_remote(&local));
         assert!(!a.accept_remote(&forged));
         assert_eq!(a.latest, Some(local.revision()));

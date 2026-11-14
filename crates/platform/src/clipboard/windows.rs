@@ -14,13 +14,14 @@ use windows_sys::Win32::System::Memory::{
 use windows_sys::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE};
 
-use super::{Snapshot, WriteOutcome};
+use super::{Snapshot, WriteOutcome, cf_html};
 use crate::input::windows::check_input_desktop;
 
 pub struct Clipboard {
     exclude: u32,
     history: u32,
     cloud: u32,
+    html: u32,
 }
 
 impl Clipboard {
@@ -28,10 +29,12 @@ impl Clipboard {
         let exclude = format("ExcludeClipboardContentFromMonitorProcessing")?;
         let history = format("CanIncludeInClipboardHistory")?;
         let cloud = format("CanUploadToCloudClipboard")?;
+        let html = format("HTML Format")?;
         Ok(Self {
             exclude,
             history,
             cloud,
+            html,
         })
     }
 
@@ -44,7 +47,12 @@ impl Clipboard {
         Ok(u64::from(unsafe { GetClipboardSequenceNumber() }))
     }
 
-    pub fn read(&self, previous: u64, limit: usize) -> io::Result<Option<Snapshot>> {
+    pub fn read(
+        &self,
+        previous: u64,
+        text_limit: usize,
+        html_limit: usize,
+    ) -> io::Result<Option<Snapshot>> {
         if self.sequence()? == previous {
             return Ok(None);
         }
@@ -54,28 +62,34 @@ impl Clipboard {
             return Ok(None);
         }
         // SAFETY: All formats are registered or standard, and the clipboard is open.
-        let text = unsafe {
+        let (text, html) = unsafe {
             if IsClipboardFormatAvailable(self.exclude) != 0
                 || IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0
                 || opt_out(self.history)
                 || opt_out(self.cloud)
                 || IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) == 0
             {
-                None
+                (None, None)
             } else {
-                read_text(limit)?
+                let text = read_text(text_limit)?;
+                let html = text.as_ref().and_then(|_| read_html(self.html, html_limit));
+                (text, html)
             }
         };
         Ok(Some(Snapshot {
             sequence: self.sequence()?,
             text,
+            html,
         }))
     }
 
-    pub fn write(&self, expected: u64, text: &str) -> io::Result<WriteOutcome> {
+    pub fn write(&self, expected: u64, text: &str, html: Option<&str>) -> io::Result<WriteOutcome> {
         let utf16: Vec<u16> = text.encode_utf16().chain([0]).collect();
         let data = Memory::new(&utf16)?;
         let excluded = Memory::new(&[0u8])?;
+        let html = html
+            .map(|text| Memory::new(cf_html::encode(text).as_bytes()))
+            .transpose()?;
         let owner = Owner::new()?;
         let _clipboard = Open::new(owner.0)?;
         if self.sequence()? != expected {
@@ -86,11 +100,39 @@ impl Clipboard {
             return Err(io::Error::last_os_error());
         }
         excluded.publish(self.exclude)?;
+        if let Some(html) = html {
+            // Publish the richest recognized format first. Plain text still works
+            // if the optional format cannot be published.
+            let _ = html.publish(self.html);
+        }
         data.publish(u32::from(CF_UNICODETEXT))?;
         // Record the sequence under the clipboard lock. Windows may advance
         // it on close. The exclusion marker suppresses that notification
         // without also hiding a local copy that wins the race after close.
         Ok(WriteOutcome::Applied(self.sequence()?))
+    }
+}
+
+unsafe fn read_html(format: u32, limit: usize) -> Option<String> {
+    // SAFETY: The caller holds the clipboard lock. GlobalSize bounds the
+    // readable bytes, and the returned string owns its data before unlock.
+    unsafe {
+        if IsClipboardFormatAvailable(format) == 0 {
+            return None;
+        }
+        let handle = GetClipboardData(format);
+        if handle.is_null() {
+            return None;
+        }
+        let bytes = GlobalSize(handle).min(limit.saturating_add(cf_html::MAX_HEADER_BYTES));
+        let data = GlobalLock(handle).cast::<u8>();
+        if data.is_null() {
+            return None;
+        }
+        let fragment =
+            cf_html::decode(std::slice::from_raw_parts(data, bytes), limit).map(str::to_owned);
+        GlobalUnlock(handle);
+        fragment
     }
 }
 
@@ -312,20 +354,26 @@ mod tests {
             }
         }
         let _restore = Restore(&clipboard, had_empty_text);
-        let WriteOutcome::Applied(_) = clipboard.write(empty, TEXT).unwrap() else {
+        let html = "<strong>日本語🧪</strong>";
+        let WriteOutcome::Applied(_) = clipboard.write(empty, TEXT, Some(html)).unwrap() else {
             panic!("clipboard changed before the test write");
         };
         assert!(matches!(
-            clipboard.write(empty, "stale").unwrap(),
+            clipboard.write(empty, "stale", None).unwrap(),
             WriteOutcome::Changed
         ));
-        let snapshot = clipboard.read(empty, 64 * 1024).unwrap().unwrap();
+        let snapshot = clipboard
+            .read(empty, 64 * 1024, 64 * 1024)
+            .unwrap()
+            .unwrap();
         assert!(
             snapshot.text.is_none(),
             "remote text must not be reread for sync"
         );
+        assert!(snapshot.html.is_none());
         let _open = Open::new(null_mut()).unwrap();
         // SAFETY: Read the test string directly from the currently open clipboard.
         assert!(unsafe { read_text(64 * 1024) }.unwrap().as_deref() == Some(TEXT));
+        assert!(unsafe { read_html(clipboard.html, 64 * 1024) }.as_deref() == Some(html));
     }
 }
