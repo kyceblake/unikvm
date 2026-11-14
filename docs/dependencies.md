@@ -38,6 +38,12 @@ Use one crypto provider to limit the dependency and native build surface. The de
 | [mdns-sd](https://crates.io/crates/mdns-sd) | 0.21.7 | 1.71 | Apache-2.0 OR MIT | 2026-11-02 | Register, browse, and remove DNS-SD records with async event delivery and interface scoping. |
 | [if-addrs](https://crates.io/crates/if-addrs) | 0.15.0 | Unspecified | MIT OR BSD-3-Clause | 2026-02-08 | Reuse the discovery library's interface dependency to select the local interface and validate hints against its subnet. |
 
+## Adopted for the macOS input probe
+
+| Crate | Stable release | Declared MSRV | License | Published | Decision |
+| --- | --- | --- | --- | --- | --- |
+| [core-graphics](https://crates.io/crates/core-graphics) | 0.25.0 | 1.65 | MIT OR Apache-2.0 | 2025-05-27 | macOS-only Quartz event creation, tags, physical keycodes, and display bounds. Enable `highsierra` for scroll event creation. Use two native calls for posting permission. |
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |
@@ -47,7 +53,6 @@ Use one crypto provider to limit the dependency and native build surface. The de
 | [ratatui](https://crates.io/crates/ratatui) | 0.30.2 | 1.88 | MIT | 2026-06-19 | Terminal rendering and lifecycle. Build a status view once real peer data is available. |
 | [crossterm](https://crates.io/crates/crossterm) | 0.29.0 | 1.63 | MIT | 2025-04-05 | Terminal events for Ratatui. Recheck matching Ratatui backend features when wiring the TUI. |
 | [enigo](https://crates.io/crates/enigo) | 0.6.1 | 1.85 | MIT | 2025-08-28 | Injection candidate. Verify tagging, physical-key mapping, and release behavior before adoption. |
-| [core-graphics](https://crates.io/crates/core-graphics) | 0.25.0 | 1.65 | MIT OR Apache-2.0 | 2025-05-27 | macOS event taps and posting. Check bindings for permission preflights when prototyping. |
 | [x11rb](https://crates.io/crates/x11rb) | 0.14.0 | 1.68 | MIT OR Apache-2.0 | 2026-07-16 | X11 protocol client for XInput2, XTEST and RandR, subject to runtime checks. |
 | [ashpd](https://crates.io/crates/ashpd) | 0.14.0 | 1.89 | MIT | 2026-11-05 | Portal frontend for discovery of Wayland capabilities, consent and session management. |
 | [reis](https://crates.io/crates/reis) | 0.7.1 | 1.71 | MIT | 2026-07-30 | Rust EI protocol implementation candidate used with a portal-provided EIS socket. |

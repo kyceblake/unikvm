@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::io;
 use std::mem::size_of;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
@@ -23,7 +23,7 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOD_CONTROL,
     MOD_NOREPEAT, MOD_SHIFT, MOUSEEVENTF_MOVE, MOUSEINPUT, RegisterHotKey, SendInput,
-    UnregisterHotKey, VK_F10, VK_F24,
+    UnregisterHotKey, VK_F9, VK_F10, VK_F24,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, HHOOK, HOOKPROC, KBDLLHOOKSTRUCT,
@@ -42,13 +42,21 @@ static MOUSE_SEEN: AtomicU32 = AtomicU32::new(0);
 static MOUSE_PASSED: AtomicU32 = AtomicU32::new(0);
 static PHYSICAL_KEYS: AtomicU32 = AtomicU32::new(0);
 static PHYSICAL_MOUSE: AtomicU32 = AtomicU32::new(0);
+static SUPPRESS_F9: AtomicBool = AtomicBool::new(false);
+static F9_BLOCKED: AtomicU32 = AtomicU32::new(0);
+static F9_FORWARDED: AtomicU32 = AtomicU32::new(0);
 
 pub(super) fn run() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     let manual = match args.next().as_deref() {
-        None => false,
-        Some("--manual") if args.next().is_none() => true,
-        _ => return Err(io::Error::other("usage: input_probe [--manual]")),
+        None => None,
+        Some("--manual") if args.next().is_none() => Some(false),
+        Some("--suppress-f9") if args.next().is_none() => Some(true),
+        _ => {
+            return Err(io::Error::other(
+                "usage: input_probe [--manual | --suppress-f9]",
+            ));
+        }
     };
 
     // SAFETY: This single-threaded process has created no windows.
@@ -95,16 +103,32 @@ pub(super) fn run() -> io::Result<()> {
         println!("Tagged keyboard and mouse injection, capture, and suppression passed.");
     }
 
-    if manual {
+    if let Some(suppress_f9) = manual {
         PHYSICAL_KEYS.store(0, Relaxed);
         PHYSICAL_MOUSE.store(0, Relaxed);
-        println!("Within 10 seconds, move the mouse and press Ctrl+Shift+F10.");
+        if suppress_f9 {
+            SUPPRESS_F9.store(true, Relaxed);
+            println!("Within 10 seconds, move the mouse, tap F9, then press Ctrl+Shift+F10.");
+        } else {
+            println!("Within 10 seconds, move the mouse and press Ctrl+Shift+F10.");
+        }
         let hotkey = pump(Duration::from_secs(10), || false)?;
+        SUPPRESS_F9.store(false, Relaxed);
         let keys = PHYSICAL_KEYS.load(Relaxed);
         let mouse = PHYSICAL_MOUSE.load(Relaxed);
         println!("Physical key events: {keys}. Physical mouse events: {mouse}. Hotkey: {hotkey}.");
         if !hotkey || keys == 0 || mouse == 0 {
             return Err(io::Error::other("manual checks were incomplete"));
+        }
+        if suppress_f9 {
+            let blocked = F9_BLOCKED.load(Relaxed);
+            let forwarded = F9_FORWARDED.load(Relaxed);
+            if blocked < 2 || forwarded != 0 {
+                return Err(io::Error::other(
+                    "physical F9 suppression check did not pass",
+                ));
+            }
+            println!("Blocked {blocked} physical F9 events. Downstream hook received {forwarded}.");
         }
     }
     Ok(())
@@ -150,7 +174,7 @@ fn check_input_desktop() -> io::Result<()> {
     unsafe { CloseDesktop(active) };
     if active_name? != desktop_name(current)? {
         return Err(io::Error::other(
-            "the probe is outside the current input desktop",
+            "this thread is outside the current input desktop",
         ));
     }
     Ok(())
@@ -214,6 +238,13 @@ fn keyboard_hook(
         if event.flags & LLKHF_INJECTED == 0 {
             if filter {
                 PHYSICAL_KEYS.fetch_add(1, Relaxed);
+            }
+            if event.vkCode == u32::from(VK_F9) && SUPPRESS_F9.load(Relaxed) {
+                if filter {
+                    F9_BLOCKED.fetch_add(1, Relaxed);
+                    return 1;
+                }
+                F9_FORWARDED.fetch_add(1, Relaxed);
             }
         } else if event.vkCode == u32::from(VK_F24) && matches!(event.dwExtraInfo, PASS | BLOCK) {
             count.fetch_add(1, Relaxed);

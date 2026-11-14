@@ -13,6 +13,10 @@ tempfile.workspace = true
 tokio.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics.workspace = true
+unikvm-core.workspace = true
+
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix = { workspace = true, features = ["fs", "process"] }
 

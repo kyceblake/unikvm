@@ -6,8 +6,8 @@ Runtime verification was performed on Windows 11 Pro build 26300 in an ordinary 
 
 | Desktop | Capture and suppression | Injection | Hotkeys and edge handling | Permissions and verification |
 | --- | --- | --- | --- | --- |
-| Windows | Low-level keyboard and mouse hooks on a message-pump thread. Verified with tagged injected events, including suppression ahead of a downstream hook. | `SendInput` with injection flags and extra-info marker verified for F24 press/release and relative mouse move. | `RegisterHotKey` accepted Ctrl+Shift+F10. `SetCursorPos` reached two pixels at a monitor's right edge. Physical crossing and hotkey delivery remain unverified. | Opening the input desktop and comparing it with the current thread desktop passed. UIPI blocks injection into higher-integrity apps. Secure desktops, protected targets, mixed DPI, default Win-key bindings, and physical suppression remain unverified. |
-| macOS | Candidate CoreGraphics active event tap for selective suppression. | Candidate `CGEventPost` with source tagging to filter recapture. | Evaluate a hotkey via event tap and cursor placement via `CGWarpMouseCursorPosition`. | Evaluate `CGPreflightListenEventAccess`, `CGPreflightPostEventAccess`, Accessibility and Input Monitoring grants, and Secure Input restrictions. Desktop tests pending. |
+| Windows | Low-level keyboard and mouse hooks on a message-pump thread. Verified with tagged injected events, including suppression ahead of a downstream hook. An opt-in probe can check physical F9 suppression. | `SendInput` with injection flags and extra-info marker verified for F24 press/release and relative mouse move. | `RegisterHotKey` accepted Ctrl+Shift+F10. `SetCursorPos` reached two pixels at a monitor's right edge. Physical crossing and hotkey delivery remain unverified. | Opening the input desktop and comparing it with the current thread desktop passed. UIPI blocks injection into higher-integrity apps. Secure desktops, protected targets, mixed DPI, default Win-key bindings, and physical suppression remain unverified. |
+| macOS | Candidate CoreGraphics active event tap for selective suppression. | A Quartz adapter posts tagged keyboard, pointer, button, and scroll events. Cross-target checks passed. Desktop tests pending. | Evaluate a hotkey via event tap. The injection probe clamps pointer motion to its starting display. | Posting checks Accessibility permission with `CGPreflightPostEventAccess`. Capture would require separate Input Monitoring and Secure Input testing. |
 | Linux X11 | Evaluate XInput2 events and X11 keyboard/pointer grabs. Raw observation alone leaves normal event delivery in place. | Candidate XTEST. Verify whether the chosen capture path can distinguish generated input. | Candidate `XGrabKey`, RandR geometry and `XWarpPointer`. | Requires access to an X11 session and applicable extensions. Verify grab conflicts and release on client exit. Desktop tests pending. |
 | GNOME Wayland | Candidate XDG InputCapture portal plus EIS with compositor-activated pointer barriers. | Candidate RemoteDesktop portal plus EIS. | The upstream backend lists GlobalShortcuts. The compositor controls activation and may ignore a requested cursor placement on release. | Requires detection of portal versions, consent, granted capabilities, and EIS devices. Desktop tests pending. |
 | KDE Plasma Wayland | Candidate XDG InputCapture portal plus EIS. | Candidate RemoteDesktop portal plus EIS. | KDE lists GlobalShortcuts. Verify actual bindings, activation while captured, barriers, and release coordinates. | Requires detection of portal versions, consent, and capabilities. Desktop tests pending. |
@@ -26,6 +26,26 @@ Run these from an interactive desktop with a harmless foreground window. The pro
 ```powershell
 cargo run --locked -p unikvm-platform --example input_probe
 cargo run --locked -p unikvm-platform --example input_probe -- --manual
+cargo run --locked -p unikvm-platform --example input_probe -- --suppress-f9
 ```
 
-For the manual run, move the mouse and press Ctrl+Shift+F10 during the ten-second window. This checks physical observation and hotkey delivery. Verify physical suppression, ordinary cross-monitor motion, permission changes, and elevated-window behavior on a dedicated test desktop before integrating a Windows backend.
+For the manual run, move the mouse and press Ctrl+Shift+F10 during the ten-second window. For the suppression run, also tap F9 before the hotkey. A passing run reports at least two blocked physical F9 events and zero downstream F9 events. Only F9 is suppressed in this mode. Verify ordinary cross-monitor motion, permission changes, and elevated-window behavior on a dedicated test desktop before integrating a Windows backend.
+
+## Run the macOS injection probe
+
+From Terminal in your logged-in Mac desktop session, use the first command to check permission. If access is denied, run the permission request and follow the macOS prompt or open **System Settings → Privacy & Security → Accessibility**. Repeat the check after granting access.
+
+```sh
+cargo run --locked -p unikvm-platform --example input_probe
+cargo run --locked -p unikvm-platform --example input_probe -- --request-permission
+```
+
+Use the exercise command when you can focus a blank text editor during the five-second countdown.
+
+```sh
+cargo run --locked -p unikvm-platform --example input_probe -- --exercise
+```
+
+With a US layout, verify the editor shows `Ab` and the pointer moves. The probe also posts a scroll detent, which is easiest to see in a scrollable editor. Uppercase A followed by lowercase b checks that releasing a held synthetic Shift takes effect. Key positions follow the Mac's selected layout. The adapter attempts best-effort releases on cleanup. Permission loss and process termination still need native verification before remote control is enabled.
+
+The probes run separately from the agents. On macOS, posting keyboard or pointer events requires the explicit exercise flag. [Apple posting permission](https://developer.apple.com/documentation/coregraphics/cgpreflightposteventaccess()), [Apple event posting](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:))

@@ -20,6 +20,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+core-graphics = { version = "0.25.0", features = ["highsierra"] }
 if-addrs = "0.15.0"
 mdns-sd = { version = "0.21.7", default-features = false, features = ["async"] }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }

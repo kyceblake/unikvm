@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Phase 3 native input feasibility
+
+- Added a macOS Quartz sink for physical key positions, modifiers, pointer motion, mouse buttons, and scroll. The standalone probe checks posting permission and exercises keyboard input, Shift release, cursor movement, and scrolling on request.
+- Extended the Windows probe with an explicit, ten-second physical F9 suppression check and an independent Ctrl+Shift+F10 completion shortcut.
+- Windows formatting, strict Clippy, build, all 27 standard workspace tests, and the synthetic Windows input probe passed. Cross-target Clippy passed for Apple Silicon macOS and x86-64 Linux. Cargo deny and the cached RustSec audit passed.
+- Next, exercise [both desktop probes](platform-support.md#run-the-macos-injection-probe) on the Windows PC and Mac. Then wire the approved Windows-to-Mac session over a reliable QUIC stream with explicit grant and release, an emergency return shortcut, and disconnect cleanup.
+
 ## 2026-11-14 — Multiple trusted peers
 
 - Verified PC-to-Mac discovery with the Windows dialer configured without a manual address. Its log recorded the Mac's mDNS address and an authenticated QUIC connection.
