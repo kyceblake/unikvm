@@ -17,6 +17,7 @@ use core_foundation::runloop::{
     CFRunLoop, CFRunLoopGetCurrent, CFRunLoopSource, CFRunLoopSourceContext, CFRunLoopSourceCreate,
     CFRunLoopSourceSignal, CFRunLoopStop, CFRunLoopWakeUp, kCFRunLoopDefaultMode,
 };
+use core_foundation::string::CFStringRef;
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
@@ -106,6 +107,91 @@ struct TapState {
     motion_remainder: [f64; 2],
     edge: Option<EdgeTrigger>,
     scroll_remainder: [f64; 2],
+    suspended: bool,
+}
+
+/// The native tap can disappear while macOS owns protected keyboard input.
+/// Keep its lifetime separate from the monitor/signals used by the receiver.
+struct InstalledTap {
+    port: CFMachPort,
+    source: CFRunLoopSource,
+    run_loop: CFRunLoop,
+    mode: CFStringRef,
+}
+
+impl InstalledTap {
+    fn new(state: &RefCell<TapState>, run_loop: &CFRunLoop, mode: CFStringRef) -> io::Result<Self> {
+        let mask = EVENT_TYPES
+            .into_iter()
+            .fold(0, |mask, kind| mask | (1u64 << kind as u32));
+        // SAFETY: The caller keeps state alive until this tap is invalidated.
+        // The nullable disable notifications are handled before wrapping events.
+        let raw = unsafe {
+            CGEventTapCreate(
+                CGEventTapLocation::Session,
+                CGEventTapPlacement::HeadInsertEventTap,
+                CGEventTapOptions::Default,
+                mask,
+                tap_callback,
+                (state as *const RefCell<TapState>).cast_mut().cast(),
+            )
+        };
+        if raw.is_null() {
+            return Err(tap_permission());
+        }
+        // SAFETY: Quartz transferred an owned Mach port under the create rule.
+        let port = unsafe { CFMachPort::wrap_under_create_rule(raw) };
+        let source = match port.create_runloop_source(0) {
+            Ok(source) => source,
+            Err(()) => {
+                // SAFETY: No run loop owns a source for this live port yet.
+                unsafe { CFMachPortInvalidate(raw) };
+                return Err(io::Error::other("create Quartz event tap run loop source"));
+            }
+        };
+        run_loop.add_source(&source, mode);
+        // SAFETY: The owned port remains alive for the installed source's lifetime.
+        unsafe { CGEventTapEnable(raw, true) };
+        Ok(Self {
+            port,
+            source,
+            run_loop: run_loop.clone(),
+            mode,
+        })
+    }
+
+    fn enabled(&self) -> bool {
+        // SAFETY: This owned port is valid until Drop invalidates it.
+        unsafe { CGEventTapIsEnabled(self.port.as_concrete_TypeRef()) }
+    }
+}
+
+impl Drop for InstalledTap {
+    fn drop(&mut self) {
+        self.run_loop.remove_source(&self.source, self.mode);
+        // SAFETY: Stop deliveries before releasing the source, port, or callback state.
+        unsafe { CFMachPortInvalidate(self.port.as_concrete_TypeRef()) };
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum TapAction {
+    Suspend,
+    Recreate,
+    Observe,
+    Stop,
+}
+
+fn tap_action(was_suspended: bool, protected: bool, enabled: bool) -> TapAction {
+    if protected {
+        TapAction::Suspend
+    } else if was_suspended {
+        TapAction::Recreate
+    } else if enabled {
+        TapAction::Observe
+    } else {
+        TapAction::Stop
+    }
 }
 
 struct RunLoopWake {
@@ -188,43 +274,26 @@ pub(super) fn run_tap(
         motion_remainder: [0.0; 2],
         edge: edge.map(EdgeTrigger::new),
         scroll_remainder: [0.0; 2],
+        suspended: false,
     });
-    let mask = EVENT_TYPES
-        .into_iter()
-        .fold(0, |mask, kind| mask | (1u64 << kind as u32));
-    // SAFETY: The state outlives the tap and its run loop source. Only this thread dispatches it.
-    // Use the native callback so disable notifications can carry a null CGEventRef.
-    let raw = unsafe {
-        CGEventTapCreate(
-            CGEventTapLocation::Session,
-            CGEventTapPlacement::HeadInsertEventTap,
-            CGEventTapOptions::Default,
-            mask,
-            tap_callback,
-            (&raw const state).cast_mut().cast(),
-        )
-    };
-    if raw.is_null() {
-        return Err(tap_permission());
-    }
-    // SAFETY: Quartz returned an owned Mach port under the create rule.
-    let tap = unsafe { CFMachPort::wrap_under_create_rule(raw) };
-    let source = tap
-        .create_runloop_source(0)
-        .map_err(|()| io::Error::other("create Quartz event tap run loop source"))?;
     // SAFETY: Core Foundation's default mode is a valid static run loop mode.
     let mode = unsafe { kCFRunLoopDefaultMode };
-    run_loop.add_source(&source, mode);
+    let protected = secure_input() || super::macos_session::capture_unavailable();
+    state.borrow_mut().set_suspended(protected);
+    // Do not create a reduced keyboard mask while Secure Input owns the desktop.
+    // Recreate the complete tap after unlock instead of just enabling that mask.
+    let mut tap = if protected {
+        None
+    } else {
+        Some(InstalledTap::new(&state, &run_loop, mode)?)
+    };
     run_loop.add_source(&wake.source, mode);
-    // SAFETY: The port is alive for the full dispatch loop.
-    unsafe { CGEventTapEnable(raw, true) };
 
     let result: io::Result<()> = (|| {
         let signal = wake.clone();
         initialized
             .send(Ok(Box::new(move || signal.notify())))
             .map_err(|_| io::Error::other("input monitor startup was cancelled"))?;
-        let mut secured = false;
         let mut last_permission_check = Instant::now();
         while !stop.load(Relaxed) {
             if last_permission_check.elapsed() >= Duration::from_millis(250) {
@@ -233,16 +302,26 @@ pub(super) fn run_tap(
                 }
                 last_permission_check = Instant::now();
             }
-            // SAFETY: raw remains owned by tap until after source removal.
-            if !unsafe { CGEventTapIsEnabled(raw) } {
-                return Err(io::Error::other("Quartz event tap was disabled"));
+            let protected = secure_input() || super::macos_session::capture_unavailable();
+            let was_suspended = state.borrow().suspended;
+            state.borrow_mut().set_suspended(protected);
+            match tap_action(
+                was_suspended,
+                protected,
+                tap.as_ref().is_some_and(InstalledTap::enabled),
+            ) {
+                TapAction::Suspend | TapAction::Observe => {}
+                TapAction::Recreate => {
+                    // Drop the old port before replacing it; never leave two
+                    // filters registered for the same physical event stream.
+                    drop(tap.take());
+                    tap = Some(InstalledTap::new(&state, &run_loop, mode)?);
+                }
+                TapAction::Stop => return Err(io::Error::other("Quartz event tap was disabled")),
             }
-            let secure = secure_input();
-            if secure && !secured {
-                state.borrow_mut().interrupt();
-            }
-            secured = secure;
-            if !secure {
+            if protected {
+                state.borrow_mut().update_suspended();
+            } else {
                 let mut state = state.borrow_mut();
                 let state = &mut *state;
                 state
@@ -256,10 +335,9 @@ pub(super) fn run_tap(
         Ok(())
     })();
     state.borrow_mut().local();
-    run_loop.remove_source(&source, mode);
+    state.borrow_mut().idle_cursor.show();
+    drop(tap);
     run_loop.remove_source(&wake.source, mode);
-    // SAFETY: Stop deliveries before dropping the port and callback state.
-    unsafe { CFMachPortInvalidate(raw) };
     result
 }
 
@@ -284,7 +362,11 @@ unsafe extern "C" fn tap_callback(
     if kind == CGEventType::TapDisabledByTimeout as u32
         || kind == CGEventType::TapDisabledByUserInput as u32
     {
-        state.interrupt();
+        if secure_input() || super::macos_session::capture_unavailable() {
+            state.set_suspended(true);
+        } else {
+            state.interrupt();
+        }
         return raw;
     }
     if raw.is_null() {
@@ -297,6 +379,13 @@ unsafe extern "C" fn tap_callback(
     {
         return raw;
     }
+    if state.suspended || secure_input() || super::macos_session::capture_unavailable() {
+        state.set_suspended(true);
+        // Never forward or suppress protected physical input. Mouse activity can
+        // still reclaim an incoming session when Quartz delivers it to this tap.
+        state.protected_activity(&event);
+        return raw;
+    }
     if state.capture(&event) {
         null_mut()
     } else {
@@ -305,6 +394,60 @@ unsafe extern "C" fn tap_callback(
 }
 
 impl TapState {
+    fn set_suspended(&mut self, suspended: bool) {
+        if suspended && !self.suspended {
+            self.interrupt();
+            // Old shortcut/held-event bookkeeping must not consume a release
+            // intended for the lock screen or a new post-unlock interaction.
+            self.chords = [false; 2];
+            self.swallowed_keys = [false; 256];
+            self.swallowed_buttons = [false; 5];
+            self.motion = PhysicalMotion::default();
+        }
+        self.suspended = suspended;
+    }
+
+    fn update_suspended(&mut self) {
+        let command = *self.commands.borrow_and_update();
+        self.local();
+        self.idle_cursor.show();
+        if let Command::Remote { generation, .. } = command
+            && self.stopped_generation != Some(generation)
+        {
+            self.generation = Some(generation);
+            self.emergency();
+        }
+        // Showing a receiving cursor is safe while locked. A stale hide command
+        // is consumed here so it cannot hide the lock-screen pointer after unlock.
+    }
+
+    fn protected_activity(&mut self, event: &CGEvent) {
+        use CGEventType::*;
+        match event.get_type() {
+            MouseMoved | LeftMouseDragged | RightMouseDragged | OtherMouseDragged => {
+                let [dx, dy] = [
+                    EventField::MOUSE_EVENT_DELTA_X,
+                    EventField::MOUSE_EVENT_DELTA_Y,
+                ]
+                .map(|field| {
+                    event
+                        .get_double_value_field(field)
+                        .clamp(-32768.0, 32768.0)
+                        .round() as i32
+                });
+                if self.motion.update(dx, dy, Instant::now()) {
+                    activity(&self.shortcuts);
+                }
+            }
+            ScrollWheel if event.get_integer_value_field(MOMENTUM_PHASE) != 0 => {}
+            KeyDown | KeyUp | FlagsChanged | LeftMouseDown | LeftMouseUp | RightMouseDown
+            | RightMouseUp | OtherMouseDown | OtherMouseUp | ScrollWheel => {
+                activity(&self.shortcuts);
+            }
+            _ => {}
+        }
+    }
+
     fn update(&mut self, command: Command) {
         match command {
             Command::Local { return_height } => self.return_locally(return_height),
@@ -645,6 +788,21 @@ pub(super) fn physical_input_held() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protected_desktop_preserves_monitor_and_recreates_full_tap_on_resume() {
+        for enabled in [false, true] {
+            assert_eq!(tap_action(false, true, enabled), TapAction::Suspend);
+            assert_eq!(tap_action(true, true, enabled), TapAction::Suspend);
+            assert_eq!(tap_action(true, false, enabled), TapAction::Recreate);
+        }
+    }
+
+    #[test]
+    fn disabled_tap_outside_protected_transition_stays_fail_closed() {
+        assert_eq!(tap_action(false, false, false), TapAction::Stop);
+        assert_eq!(tap_action(false, false, true), TapAction::Observe);
+    }
 
     struct RestorePointer(CGPoint);
 

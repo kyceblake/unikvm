@@ -32,6 +32,7 @@ unsafe extern "C" {
 }
 
 pub struct MacInputSink {
+    allow_locked_receive: bool,
     source: CGEventSource,
     keys: [bool; 256],
     buttons: [bool; 5],
@@ -45,6 +46,7 @@ pub struct MacInputSink {
 
 impl MacInputSink {
     pub fn enter_edge(&mut self, edge: EdgeLayout, height: u16) -> io::Result<()> {
+        self.check_access()?;
         let point = edge.place(height)?;
         self.sync_edge_position(point)
     }
@@ -58,6 +60,7 @@ impl MacInputSink {
     }
 
     pub fn exit_edge(&mut self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
+        self.check_access()?;
         if self.keys.contains(&true) || self.buttons.contains(&true) {
             return Ok(None);
         }
@@ -90,13 +93,21 @@ impl MacInputSink {
 
     /// The current slice confines synthetic pointer movement to the display containing it.
     pub fn new() -> io::Result<Self> {
+        Self::with_locked_receive(false)
+    }
+
+    pub fn with_locked_receive(allow_locked_receive: bool) -> io::Result<Self> {
         if !Self::has_permission() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "grant Accessibility to the process posting input in System Settings",
             ));
         }
-        if super::macos_capture::secure_input() || super::macos_capture::physical_input_held() {
+        if !super::macos_session::receive_allowed(
+            allow_locked_receive,
+            super::macos_capture::secure_input(),
+        ) || super::macos_capture::physical_input_held()
+        {
             return Err(io::Error::other(
                 "release local keys and mouse buttons and exit Secure Input before sharing input",
             ));
@@ -133,6 +144,7 @@ impl MacInputSink {
         }
 
         Ok(Self {
+            allow_locked_receive,
             source,
             keys: [false; 256],
             buttons: [false; 5],
@@ -150,15 +162,7 @@ impl MacInputSink {
     }
 
     pub fn send(&mut self, event: InputEvent) -> io::Result<()> {
-        if !Self::has_permission() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "macOS input posting permission was revoked",
-            ));
-        }
-        if super::macos_capture::secure_input() {
-            return Err(io::Error::other("macOS Secure Input became active"));
-        }
+        self.check_access()?;
         match event {
             InputEvent::Key { usage, state } => self.key(usage, state),
             InputEvent::PointerButton { button, state } => self.button(button, state),
@@ -168,6 +172,28 @@ impl MacInputSink {
                 vertical,
             } => self.scroll(horizontal, vertical),
         }
+    }
+
+    pub fn check_permission(&self) -> bool {
+        Self::has_permission()
+            && super::macos_session::receive_allowed(
+                self.allow_locked_receive,
+                super::macos_capture::secure_input(),
+            )
+    }
+
+    fn check_access(&self) -> io::Result<()> {
+        if !self.check_permission() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "macOS input reception is not permitted in this session",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_locked_receiver(&self) -> bool {
+        self.allow_locked_receive && super::macos_session::is_locked()
     }
 
     /// Try every pending release, including when a permission change interrupted a session.

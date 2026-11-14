@@ -1,6 +1,7 @@
 use std::{cell::Cell, time::Duration};
 
 use anyhow::{Context, Result, ensure};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::watch;
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{info, warn};
@@ -16,13 +17,19 @@ use super::Focus;
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_millis(750);
 
+#[derive(Clone, Copy)]
+pub(super) struct Options {
+    pub edge: Option<EdgeLayout>,
+    pub allow_locked_receive: bool,
+}
+
 pub async fn run(
     control: CaptureControl,
     mut signals: watch::Receiver<Shortcut>,
     mut connections: watch::Receiver<Option<quinn::Connection>>,
     peer: Fingerprint,
     state: &Cell<FocusState>,
-    edge: Option<EdgeLayout>,
+    options: Options,
 ) -> Result<()> {
     let mut session_id = 0u64;
     loop {
@@ -44,7 +51,7 @@ pub async fn run(
                 state,
                 session,
                 &mut signals,
-                edge,
+                options,
                 &control,
             )
             .await;
@@ -77,7 +84,7 @@ async fn receive(
     state: &Cell<FocusState>,
     session: ControlSession,
     signals: &mut watch::Receiver<Shortcut>,
-    edge: Option<EdgeLayout>,
+    options: Options,
     control: &CaptureControl,
 ) -> Result<()> {
     let mut request = [0; REQUEST.len()];
@@ -85,7 +92,7 @@ async fn receive(
     timeout_at(admission, recv.read_exact(&mut request))
         .await
         .context("input request timed out")??;
-    let entry = match (&request, edge) {
+    let entry = match (&request, options.edge) {
         (REQUEST, _) => None,
         (EDGE_REQUEST, Some(edge)) => {
             let mut entry = [0; 3];
@@ -110,7 +117,7 @@ async fn receive(
         return Ok(());
     };
     let baseline = signals.borrow().activity;
-    let mut sink = match InputSink::new() {
+    let mut sink = match InputSink::with_locked_receive(options.allow_locked_receive) {
         Ok(sink) if signals.has_changed().is_ok() => sink,
         Ok(_) => {
             deny(send).await;
@@ -122,6 +129,7 @@ async fn receive(
         }
     };
 
+    let edge_session = entry.is_some();
     control.show_idle_cursor();
     let result = tokio::select! {
         biased;
@@ -131,7 +139,7 @@ async fn receive(
                 .await
                 .context("input grant timed out")??;
             info!("receiving peer input");
-            inject(&mut sink, send, recv, entry).await
+            inject(&mut sink, send, recv, entry, options.edge).await
         } => result.map(|height| (false, height)),
     };
     sink.release_all().context("release synthetic input")?;
@@ -140,13 +148,7 @@ async fn receive(
         // Hide at the completed crossing before the network write can stall or
         // the sender resumes its pointer. Failed returns must reveal it again.
         control.hide_after_edge_return(baseline);
-        let reported = timeout(
-            ADMISSION_TIMEOUT,
-            send.write_all(&input::edge_return(height)),
-        )
-        .await
-        .context("report return across display edge")
-        .and_then(|result| result.context("send return across display edge"));
+        let reported = report_return(send, edge_session, height).await;
         if let Err(error) = reported {
             control.show_idle_cursor();
             return Err(error);
@@ -165,6 +167,24 @@ async fn deny(send: &mut quinn::SendStream) {
     let _ = timeout(ADMISSION_TIMEOUT, send.write_all(&[DENY])).await;
 }
 
+async fn report_return(
+    send: &mut (impl AsyncWrite + Unpin),
+    edge_session: bool,
+    height: u16,
+) -> Result<()> {
+    // Legacy shortcut senders accept EOF as release, but reject EDGE_RETURN.
+    // The caller finishes the stream after this function returns.
+    if edge_session {
+        timeout(
+            ADMISSION_TIMEOUT,
+            send.write_all(&input::edge_return(height)),
+        )
+        .await
+        .context("report return across display edge")??;
+    }
+    Ok(())
+}
+
 async fn wait_local(signals: &mut watch::Receiver<Shortcut>, baseline: u64) -> Result<()> {
     signals
         .wait_for(|signal| signal.activity != baseline)
@@ -178,17 +198,24 @@ async fn inject(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     entry: Option<(EdgeLayout, u16)>,
+    return_edge: Option<EdgeLayout>,
 ) -> Result<Option<u16>> {
     let mut deadline = Instant::now() + LEASE;
     // Reposition only after granting focus and reading the first heartbeat.
     let mut pending_entry = entry;
-    let edge = entry.map(|(edge, _)| edge);
+    let edge = entry.map(|(edge, _)| edge).or(return_edge);
+    let mut was_locked = sink.is_locked_receiver();
     let mut motion = if entry.is_none() {
         pointer_pacer(sink)
     } else {
         None
     };
     loop {
+        let locked = sink.is_locked_receiver();
+        if was_locked && !locked {
+            motion = pointer_pacer(sink);
+        }
+        was_locked = locked;
         let read = timeout_at(deadline, input::read(recv));
         let frame = if let Some(pacer) = &mut motion {
             tokio::pin!(read);
@@ -246,11 +273,13 @@ async fn inject(
             }
             Frame::Heartbeat(token) => {
                 ensure!(
-                    InputSink::has_permission(),
+                    sink.check_permission(),
                     "local input posting became unavailable"
                 );
                 let arriving = pending_entry.take();
-                if let Some((edge, height)) = arriving {
+                if let Some((edge, height)) = arriving
+                    && !sink.is_locked_receiver()
+                {
                     sink.enter_edge(edge, height)?;
                 }
                 timeout_at(deadline, send.write_all(&[HEARTBEAT_ACK + token]))
@@ -268,6 +297,9 @@ async fn inject(
 }
 
 fn pointer_pacer(sink: &InputSink) -> Option<MotionPacer> {
+    if sink.is_locked_receiver() {
+        return None;
+    }
     match MotionPacer::new(sink) {
         Ok(motion) => {
             if let Some(period) = motion.display_period() {
@@ -291,7 +323,8 @@ fn move_pointer(
     dx: i32,
     dy: i32,
 ) -> std::io::Result<Option<u16>> {
-    if let Some(edge) = edge
+    if !sink.is_locked_receiver()
+        && let Some(edge) = edge
         && let Some(height) = sink.exit_edge(edge, dx, dy)?
     {
         return Ok(Some(height));
@@ -311,6 +344,27 @@ fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, duplex};
+
+    #[tokio::test]
+    async fn shortcut_return_uses_eof_instead_of_an_unexpected_edge_frame() {
+        let (mut send, mut recv) = duplex(32);
+        report_return(&mut send, false, 32768).await.unwrap();
+        drop(send);
+        let mut bytes = Vec::new();
+        recv.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn edge_return_reports_the_mapped_height() {
+        let (mut send, mut recv) = duplex(32);
+        report_return(&mut send, true, 12345).await.unwrap();
+        drop(send);
+        let mut bytes = Vec::new();
+        recv.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(bytes, input::edge_return(12345));
+    }
 
     #[tokio::test]
     async fn takeover_only_responds_to_activity_after_the_session_snapshot() {

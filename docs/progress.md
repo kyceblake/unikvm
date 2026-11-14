@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-15 — Opt-in locked Mac receiver and Windows feasibility probe
+
+- Added `input.allow_locked_receive` (default false) for a pinned receiving peer. Mac reception requires this user's logged-in console session; Secure Input is allowed only while that eligible session is normally locked. Protected local input is never forwarded. The monitor survives suspension and recreates its complete event tap after unlock.
+- The operator unlocked the Mac using Windows input and confirmed sharing resumed. Fixed a subsequent edge-return regression: the receiver retains its configured return side after unlock, and shortcut sessions close compatibly without sending an unexpected edge frame. The operator confirmed mouse crossing returns to Windows again.
+- Added a capability-only Windows LocalSystem service/console-worker probe with a SYSTEM-only, PID-verified pipe and bounded reports. It never injects input. A protected-path administrative script installs, runs, reports, and removes the one-shot probe. Actual Windows locked receiving remains explicitly unsupported until native proof and a separately authenticated injector are implemented.
+- Apple Silicon formatting, strict Clippy, workspace build and 46 standard tests passed. Windows platform/example cross-target strict Clippy passed; this is compile-time verification only. Read-only Mac session/permission probing passed. Native Windows installation and secure-desktop attachment remain pending operator testing.
+
 ## 2026-11-15 — Complete fast crossing before edge return
 
 - Fixed a discarded crossing step: the receiver could report an edge return before applying the movement that reached it, leaving the visible cursor far inside the display. Both native sinks now place the cursor at the exact exit edge and interpolated crossing height before returning the handoff result. The Mac also updates its cached pointer and posts the tagged position.

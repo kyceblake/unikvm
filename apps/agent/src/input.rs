@@ -13,6 +13,7 @@ pub struct Control {
     peer: Fingerprint,
     mode: InputMode,
     side: Option<PeerSide>,
+    allow_locked_receive: bool,
 }
 
 impl Control {
@@ -29,6 +30,7 @@ impl Control {
             peer,
             mode: config.mode,
             side: config.peer_side,
+            allow_locked_receive: config.allow_locked_receive,
         })
     }
 
@@ -55,6 +57,9 @@ impl Control {
         if let Some(edge) = edge {
             info!(side = ?edge.side, "primary display edge switching enabled");
         }
+        if self.allow_locked_receive {
+            info!("locked-desktop reception enabled for configured input peer");
+        }
         if allow_send {
             info!(
                 "input ready: Ctrl+Shift+F9 sends to the peer and Ctrl+Shift+F10 returns locally"
@@ -73,7 +78,10 @@ impl Control {
                     self.connections,
                     self.peer,
                     &focus,
-                    None,
+                    receive::Options {
+                        edge: None,
+                        allow_locked_receive: self.allow_locked_receive,
+                    },
                 )
                 .await
             }
@@ -82,7 +90,7 @@ impl Control {
                 let signals = capture.shortcuts.clone();
                 tokio::select! {
                     result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, edge.map(|edge| edge.side)) => result,
-                    result = receive::run(control, signals, self.connections, self.peer, &focus, edge) => result,
+                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive }) => result,
                 }
             }
         }
@@ -90,7 +98,13 @@ impl Control {
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub async fn run(self) -> Result<()> {
-        let _ = (self.connections, self.peer, self.mode, self.side);
+        let _ = (
+            self.connections,
+            self.peer,
+            self.mode,
+            self.side,
+            self.allow_locked_receive,
+        );
         bail!("input sharing is available on Windows and macOS")
     }
 }

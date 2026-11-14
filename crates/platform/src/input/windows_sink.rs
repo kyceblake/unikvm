@@ -54,7 +54,24 @@ impl WindowsInputSink {
     }
 
     pub fn new() -> io::Result<Self> {
-        check_input_desktop()?;
+        Self::with_locked_receive(false)
+    }
+
+    /// A user-session process cannot inject into Winlogon's secure desktop.
+    /// Keep the opt-in explicit until an authenticated privileged helper exists.
+    pub fn with_locked_receive(allow_locked_receive: bool) -> io::Result<Self> {
+        if let Err(error) = check_input_desktop() {
+            return Err(if allow_locked_receive {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "active Windows desktop unavailable; locked receiving requires a privileged helper not included in this build ({error})"
+                    ),
+                )
+            } else {
+                error
+            });
+        }
         if physical_input_held() {
             return Err(io::Error::other(
                 "release local keys and mouse buttons before sharing input",
@@ -64,6 +81,14 @@ impl WindowsInputSink {
             keys: [false; 256],
             buttons: [false; 5],
         })
+    }
+
+    pub fn check_permission(&self) -> bool {
+        Self::has_permission()
+    }
+
+    pub fn is_locked_receiver(&self) -> bool {
+        false
     }
 
     pub fn send(&mut self, event: InputEvent) -> io::Result<()> {

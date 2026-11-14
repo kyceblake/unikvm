@@ -26,6 +26,26 @@ Move the PC mouse to the left edge of the primary Windows display. The pointer s
 
 The fixed layout uses the primary displays and reserves edges occupied by local monitors for the native desktop. Restart the agents after changing the primary displays. The sender hides its parked cursor while forwarding input. When you cross back, the sender's cursor reappears at the matching height and the receiver's cursor hides until local input or the next handoff. On Windows, edge sharing reads relative motion from Raw Input while the cursor is parked. Try several quick crossings in each direction, then use one blank editor on each machine to verify that keyboard focus follows the pointer. Monitor selection and synchronized layouts remain future work.
 
+## Receive on a locked Mac (experimental)
+
+The Mac can opt in to receiving from its configured input peer while its already logged-in desktop is normally locked. Add this key to the existing Mac `[input]` table and restart:
+
+```toml
+allow_locked_receive = true
+```
+
+Keep the sending Windows desktop unlocked. Once the Mac is locked, use Ctrl+Shift+F9 on Windows to request a fresh session, and Ctrl+Shift+F10 to return. Type the Mac's normal login password yourself on the Windows keyboard. Display-edge returns stay disabled while locked and resume after unlock when a peer side is configured. Shortcut-started sessions end by closing the stream so existing senders can return without understanding edge-return frames; their cursor returns to its original capture position. The Mac's local keyboard capture stays suspended while locked and is recreated after unlock.
+
+This option defaults to false. It does not permit sending from a locked Mac or receiving into unrelated Secure Input fields on an unlocked Mac. Physical-key takeover on the locked receiver is not reliable while macOS withholds event-tap input, so the sender's return shortcut and lease remain the recovery path. The agent must already be running in the logged-in Mac session with Accessibility permission; this does not provide FileVault startup or logged-out access.
+
+Check receiver permission without posting input:
+
+```sh
+cargo run --locked -p unikvm-platform --example input_probe -- --locked-receive-check
+```
+
+Locked Windows receiving is not implemented in the user-session agent. It requires the separate [Windows secure-desktop helper](windows-locked-receiver.md); setting this option alone does not grant access to Winlogon.
+
 ## Test input sharing
 
 1. Wait for `authenticated peer connected` on both agents. Focus a blank editor on the Mac.

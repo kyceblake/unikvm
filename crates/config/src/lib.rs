@@ -35,6 +35,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct InputConfig {
     pub mode: InputMode,
+    #[serde(default)]
+    pub allow_locked_receive: bool,
     pub peer_fingerprint: String,
     pub peer_side: Option<PeerSide>,
 }
@@ -114,6 +116,8 @@ pub enum ConfigError {
     InputPeer,
     #[error("input.peer_side requires bidirectional input mode")]
     InputLayout,
+    #[error("input.allow_locked_receive requires receive or bidirectional input mode")]
+    LockedReceiveMode,
 }
 
 impl Config {
@@ -138,6 +142,13 @@ impl Config {
             input.peer_side.is_some() && input.mode != InputMode::Bidirectional
         }) {
             return Err(ConfigError::InputLayout);
+        }
+        if config
+            .input
+            .as_ref()
+            .is_some_and(|input| input.allow_locked_receive && input.mode == InputMode::Send)
+        {
+            return Err(ConfigError::LockedReceiveMode);
         }
         if let Some(network) = &mut config.network {
             match (
@@ -227,6 +238,29 @@ mod tests {
             Err(ConfigError::InputPeer)
         ));
         let network = "[network]\nlisten = '127.0.0.1:24800'\nidentity = 'identity.bin'\npeer = '127.0.0.1:24801'\npeer_certificate = 'peer.der'\npeer_fingerprint = 'AB'\n";
+        assert!(
+            !Config::parse(&format!("{base}{network}{input}"))
+                .unwrap()
+                .input
+                .unwrap()
+                .allow_locked_receive
+        );
+        assert!(
+            Config::parse(&format!(
+                "{base}{network}{input}\nallow_locked_receive = true"
+            ))
+            .unwrap()
+            .input
+            .unwrap()
+            .allow_locked_receive
+        );
+        assert!(matches!(
+            Config::parse(&format!(
+                "{base}{network}{}\nallow_locked_receive = true",
+                input.replace("'bidirectional'", "'send'")
+            )),
+            Err(ConfigError::LockedReceiveMode)
+        ));
         assert_eq!(
             Config::parse(&format!("{base}{network}{input}"))
                 .unwrap()

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage};
 use unikvm_platform::input::{Capture, MacInputSink, MotionPacer, request_monitor_permission};
 
-const USAGE: &str = "usage: input_probe [--request-permission | --exercise | --request-capture-permission | --capture | --refresh]";
+const USAGE: &str = "usage: input_probe [--request-permission | --exercise | --request-capture-permission | --capture | --refresh | --locked-receive-check]";
 
 pub(super) fn run() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -26,6 +26,14 @@ pub(super) fn run() -> io::Result<()> {
             Ok(())
         }
         Some("--exercise") => exercise(),
+        Some("--locked-receive-check") => {
+            let sink = MacInputSink::with_locked_receive(true)?;
+            println!(
+                "macOS receiver permission passed; locked={}",
+                sink.is_locked_receiver()
+            );
+            Ok(())
+        }
         Some("--request-capture-permission") => {
             let _ = request_monitor_permission();
             Capture::start(true)?;
