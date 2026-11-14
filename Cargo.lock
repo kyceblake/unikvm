@@ -1142,7 +1142,9 @@ dependencies = [
 name = "unikvm-platform"
 version = "0.1.0"
 dependencies = [
+ "core-foundation",
  "core-graphics",
+ "foreign-types",
  "rustix",
  "tempfile",
  "tokio",

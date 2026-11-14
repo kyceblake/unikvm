@@ -10,15 +10,23 @@ use core_graphics::event::{
 };
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::{CGPoint, CGRect};
+use core_graphics::sys::CGEventSourceRef;
+use foreign_types::ForeignType;
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
-const EVENT_TAG: i64 = 0x55_4e_49_4b_56_4d;
+pub(super) const EVENT_TAG: i64 = 0x55_4e_49_4b_56_4d;
 const DETENT: i64 = 120;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightPostEventAccess() -> bool;
     fn CGRequestPostEventAccess() -> bool;
+    fn CGEventSourceSetLocalEventsSuppressionInterval(source: CGEventSourceRef, seconds: f64);
+    fn CGEventSourceSetLocalEventsFilterDuringSuppressionState(
+        source: CGEventSourceRef,
+        filter: u32,
+        state: u32,
+    );
 }
 
 pub struct MacInputSink {
@@ -53,7 +61,24 @@ impl MacInputSink {
                 "grant Accessibility to the process posting input in System Settings",
             ));
         }
+        if super::macos_capture::secure_input() || super::macos_capture::physical_input_held() {
+            return Err(io::Error::other(
+                "release local keys and mouse buttons and exit Secure Input before sharing input",
+            ));
+        }
         let source = quartz(CGEventSource::new(CGEventSourceStateID::Private))?;
+        // Keep local keyboard, mouse and system events enabled even during a synthetic drag.
+        const PERMIT_ALL: u32 = 0x7;
+        const REMOTE_DRAG: u32 = 1;
+        // SAFETY: The calls use this live source and documented Quartz values.
+        unsafe {
+            CGEventSourceSetLocalEventsSuppressionInterval(source.as_ptr(), 0.0);
+            CGEventSourceSetLocalEventsFilterDuringSuppressionState(
+                source.as_ptr(),
+                PERMIT_ALL,
+                REMOTE_DRAG,
+            );
+        }
         let pointer = quartz(CGEvent::new(source.clone()))?.location();
         let displays = CGDisplay::active_displays().map_err(|status| {
             io::Error::other(format!("could not list active displays ({status})"))
@@ -88,6 +113,9 @@ impl MacInputSink {
                 io::ErrorKind::PermissionDenied,
                 "macOS input posting permission was revoked",
             ));
+        }
+        if super::macos_capture::secure_input() {
+            return Err(io::Error::other("macOS Secure Input became active"));
         }
         match event {
             InputEvent::Key { usage, state } => self.key(usage, state),
@@ -311,7 +339,7 @@ fn mouse_button(
     }
 }
 
-fn key_code(usage: KeyUsage) -> Option<u16> {
+pub(super) fn key_code(usage: KeyUsage) -> Option<u16> {
     const LETTERS: [u16; 26] = [
         KeyCode::ANSI_A,
         KeyCode::ANSI_B,

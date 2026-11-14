@@ -43,6 +43,7 @@ pub struct InputConfig {
 pub enum InputMode {
     Send,
     Receive,
+    Bidirectional,
 }
 
 /// Explicit local UDP bind and manually approved peers.
@@ -204,18 +205,20 @@ mod tests {
     #[test]
     fn input_requires_a_separately_approved_peer_and_is_disabled_by_default() {
         assert!(Config::default().input.is_none());
-        let input = "[input]\nmode = 'receive'\npeer_fingerprint = 'ab'";
+        let input = "[input]\nmode = 'bidirectional'\npeer_fingerprint = 'ab'";
         let base = "schema_version = 1\n";
         assert!(matches!(
             Config::parse(&format!("{base}{input}")),
             Err(ConfigError::InputPeer)
         ));
         let network = "[network]\nlisten = '127.0.0.1:24800'\nidentity = 'identity.bin'\npeer = '127.0.0.1:24801'\npeer_certificate = 'peer.der'\npeer_fingerprint = 'AB'\n";
-        assert!(
+        assert_eq!(
             Config::parse(&format!("{base}{network}{input}"))
                 .unwrap()
                 .input
-                .is_some()
+                .unwrap()
+                .mode,
+            super::InputMode::Bidirectional
         );
         assert!(matches!(
             Config::parse(&format!("{base}{network}{}", input.replace("'ab'", "'cd'"))),

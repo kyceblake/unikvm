@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{cell::Cell, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use tokio::sync::watch;
@@ -6,19 +6,21 @@ use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout};
 use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
 use unikvm_network::identity::Fingerprint;
-use unikvm_platform::input::{Shortcut, WindowsCapture};
+use unikvm_platform::input::{Capture, Shortcut};
 use unikvm_protocol::input::{
     self, Frame, GRANT, HEARTBEAT_ACK, HEARTBEAT_INTERVAL, HEARTBEAT_TOKENS, LEASE, REQUEST,
 };
 
+use super::Focus;
+
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub async fn run(
+    capture: &mut Capture,
     connections: watch::Receiver<Option<quinn::Connection>>,
     peer: Fingerprint,
+    state: &Cell<FocusState>,
 ) -> Result<()> {
-    let mut capture = WindowsCapture::start().context("start Windows input capture")?;
-    info!("input ready: Ctrl+Shift+F9 sends to Mac, Ctrl+Shift+F10 returns to Windows");
     let mut requested = 0;
 
     while capture.shortcuts.changed().await.is_ok() {
@@ -42,21 +44,24 @@ pub async fn run(
             peer: peer.device_id(),
             id: SessionId(shortcut.start),
         };
-        let pending = FocusState::Local.transition(FocusEvent::Request(session));
-        let result = control(&mut capture, connection, pending, session, shortcut.stop).await;
+        let Some(focus) = Focus::reserve(state, session, FocusEvent::Request(session)) else {
+            continue;
+        };
+        let result = control(capture, connection, &focus, session, shortcut.stop).await;
         capture.local();
+        drop(focus);
         requested = capture.shortcuts.borrow_and_update().start;
         if let Err(error) = result {
             warn!(%error, "input session ended");
         }
     }
-    anyhow::bail!("Windows input hook thread stopped")
+    anyhow::bail!("local input monitor stopped")
 }
 
 async fn control(
-    capture: &mut WindowsCapture,
+    capture: &mut Capture,
     connection: quinn::Connection,
-    pending: FocusState,
+    focus: &Focus<'_>,
     session: ControlSession,
     stop: u64,
 ) -> Result<()> {
@@ -68,12 +73,12 @@ async fn control(
             send.write_all(REQUEST).await?;
             let mut reply = [0];
             recv.read_exact(&mut reply).await?;
-            ensure!(reply[0] == GRANT, "Mac did not grant this input session");
+            ensure!(reply[0] == GRANT, "peer did not grant this input session");
             Ok::<_, anyhow::Error>((send, recv))
         }) => setup.context("request input grant timed out")??,
     };
     ensure!(
-        pending.transition(FocusEvent::Grant(session)) == FocusState::Sending(session),
+        focus.transition(FocusEvent::Grant(session)) == FocusState::Sending(session),
         "input grant no longer matches"
     );
     let result = active(capture, &mut send, &mut recv, session.id.0, stop).await;
@@ -92,7 +97,7 @@ async fn control(
         let _ = send.reset(0u32.into());
     }
     let _ = recv.stop(0u32.into());
-    info!("input returned to Windows");
+    info!("input returned locally");
     result
 }
 
@@ -101,7 +106,7 @@ async fn wait_stop(shortcuts: &mut watch::Receiver<Shortcut>, stop: u64) {
 }
 
 async fn active(
-    capture: &mut WindowsCapture,
+    capture: &mut Capture,
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     generation: u64,
@@ -122,18 +127,19 @@ async fn active(
             () = wait_stop(&mut capture.shortcuts, stop) => {
                 return Ok(());
             }
-            () = &mut deadline => anyhow::bail!("Mac input lease expired"),
+            () = &mut deadline => anyhow::bail!("peer input lease expired"),
             reply = recv.read(&mut ack) => {
-                ensure!(reply? == Some(1) && (HEARTBEAT_ACK..HEARTBEAT_ACK + HEARTBEAT_TOKENS).contains(&ack[0]), "Mac closed the input session");
-                let sent = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected Mac input acknowledgment")?;
+                let Some(1) = reply? else { return Ok(()); };
+                ensure!((HEARTBEAT_ACK..HEARTBEAT_ACK + HEARTBEAT_TOKENS).contains(&ack[0]), "invalid input acknowledgment");
+                let sent = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected peer input acknowledgment")?;
                 let expires = sent + LEASE;
-                ensure!(expires > Instant::now(), "Mac input acknowledgment arrived after the lease expired");
+                ensure!(expires > Instant::now(), "peer input acknowledgment arrived after the lease expired");
                 if expires > deadline.deadline() {
                     deadline.as_mut().reset(expires);
                 }
                 capture.renew(generation, expires.into_std());
                 if !started {
-                    info!("sending input to Mac");
+                    info!("sending input to peer");
                     started = true;
                 }
                 continue;
@@ -144,7 +150,7 @@ async fn active(
                 pending[usize::from(token)] = Some(Instant::now());
                 Frame::Heartbeat(token)
             },
-            event = capture.events.recv() => Frame::Event(event.context("Windows input capture stopped")?),
+            event = capture.events.recv() => Frame::Event(event.context("local input capture stopped")?),
         };
 
         tokio::select! {

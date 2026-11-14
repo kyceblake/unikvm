@@ -7,11 +7,10 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering::Relaxed},
 };
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, watch};
-use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
+use unikvm_core::input::{InputEvent, KeyUsage, PointerButton};
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::StationsAndDesktops::{
@@ -32,40 +31,20 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
-const QUEUE_SIZE: usize = 256;
-const POLL: Duration = Duration::from_millis(20);
+use super::capture::{ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state};
+
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
-const ARM_DELAY: Duration = Duration::from_secs(3);
 
 thread_local! {
     static HOOK_STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Shortcut {
-    pub start: u64,
-    pub stop: u64,
-    pub cancelled: bool,
-}
-
-pub struct WindowsCapture {
-    commands: watch::Sender<Command>,
-    pub shortcuts: watch::Receiver<Shortcut>,
-    pub events: mpsc::Receiver<InputEvent>,
-    worker: Option<JoinHandle<()>>,
-    stop: Arc<AtomicBool>,
-}
-
-#[derive(Clone, Copy)]
-enum Command {
-    Local,
-    Remote { generation: u64, expires: Instant },
-}
-
 struct HookState {
+    commands: watch::Receiver<Command>,
     shortcuts: watch::Sender<Shortcut>,
     events: mpsc::Sender<InputEvent>,
     remote: bool,
+    allow_send: bool,
     chords: [bool; 2],
     down: [bool; 8],
     swallowed_keys: [bool; 256],
@@ -75,63 +54,17 @@ struct HookState {
     generation: Option<u64>,
     arm_until: Instant,
     mouse: Option<(i32, i32)>,
+    last_pointer: POINT,
+    motion: PhysicalMotion,
 }
 
-impl WindowsCapture {
-    pub fn start() -> io::Result<Self> {
-        let (commands, receiver) = watch::channel(Command::Local);
-        let (signals, shortcuts) = watch::channel(Shortcut::default());
-        let (events, input) = mpsc::channel(QUEUE_SIZE);
-        let (initialized, ready) = std::sync::mpsc::sync_channel(1);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stopped = stop.clone();
-        let worker = thread::Builder::new()
-            .name("unikvm input hooks".into())
-            .spawn(move || {
-                let result = run_hooks(receiver, signals, events, stopped, &initialized);
-                if let Err(error) = result {
-                    // The receiver sees channel closure if startup finished already.
-                    let _ = initialized.try_send(Err(error));
-                }
-            })?;
-        ready.recv().map_err(io::Error::other)??;
-        Ok(Self {
-            commands,
-            shortcuts,
-            events: input,
-            worker: Some(worker),
-            stop,
-        })
-    }
-
-    pub fn renew(&self, generation: u64, expires: Instant) {
-        self.commands.send_replace(Command::Remote {
-            generation,
-            expires,
-        });
-    }
-
-    pub fn local(&self) {
-        self.commands.send_replace(Command::Local);
-    }
-}
-
-impl Drop for WindowsCapture {
-    fn drop(&mut self) {
-        self.local();
-        self.stop.store(true, Relaxed);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn run_hooks(
+pub(super) fn run_hooks(
     commands: watch::Receiver<Command>,
     shortcuts: watch::Sender<Shortcut>,
     events: mpsc::Sender<InputEvent>,
     stop: Arc<AtomicBool>,
     initialized: &std::sync::mpsc::SyncSender<io::Result<()>>,
+    allow_send: bool,
 ) -> io::Result<()> {
     // SAFETY: This dedicated hook thread owns its DPI context.
     if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.is_null()
@@ -139,11 +72,18 @@ fn run_hooks(
         return Err(io::Error::last_os_error());
     }
     check_input_desktop()?;
+    let mut last_pointer = POINT::default();
+    // SAFETY: GetCursorPos writes to this owned POINT.
+    if unsafe { GetCursorPos(&mut last_pointer) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
     HOOK_STATE.with(|state| {
         *state.borrow_mut() = Some(HookState {
+            commands,
             shortcuts,
             events,
             remote: false,
+            allow_send,
             chords: [false; 2],
             down: [false; 8],
             swallowed_keys: [false; 256],
@@ -153,6 +93,8 @@ fn run_hooks(
             generation: None,
             arm_until: Instant::now(),
             mouse: None,
+            last_pointer,
+            motion: PhysicalMotion::default(),
         });
     });
     let _keyboard = Hook::install(WH_KEYBOARD_LL, keyboard_hook)?;
@@ -160,28 +102,37 @@ fn run_hooks(
     initialized.send(Ok(())).map_err(io::Error::other)?;
 
     let mut last_desktop_check = Instant::now();
+    let mut desktop_available = true;
     while !stop.load(Relaxed) {
+        let now = Instant::now();
+        let mut desktop_lost = false;
+        if now.duration_since(last_desktop_check) >= DESKTOP_CHECK {
+            let available = check_input_desktop().is_ok();
+            desktop_lost = desktop_available && !available;
+            desktop_available = available;
+            last_desktop_check = now;
+        }
         HOOK_STATE.with(|state| {
             let mut state = state.borrow_mut();
             let state = state.as_mut().expect("hook state initialized");
-            let command = *commands.borrow();
+            if !desktop_available {
+                if desktop_lost {
+                    activity(&state.shortcuts);
+                    state.emergency();
+                }
+                return;
+            }
+            let command = *state.commands.borrow();
             match command {
                 Command::Remote {
                     generation,
                     expires,
                 } if state.stopped_generation != Some(generation) => {
-                    let now = Instant::now();
                     if state.generation != Some(generation) {
                         state.generation = Some(generation);
                         state.arm_until = now + ARM_DELAY;
                     }
-                    let desktop_lost = if now.duration_since(last_desktop_check) >= DESKTOP_CHECK {
-                        last_desktop_check = now;
-                        check_input_desktop().is_err()
-                    } else {
-                        false
-                    };
-                    if now >= expires || desktop_lost || (!state.remote && now >= state.arm_until) {
+                    if now >= expires || (!state.remote && now >= state.arm_until) {
                         state.emergency();
                     } else if !state.remote && !physical_input_held() {
                         // SAFETY: GetCursorPos writes to this owned POINT.
@@ -256,13 +207,15 @@ impl HookState {
     }
 
     fn key(&mut self, event: &KBDLLHOOKSTRUCT, pressed: bool) -> bool {
+        self.check_capture_command();
+        activity(&self.shortcuts);
         let usage = key_usage(event.scanCode, event.flags & LLKHF_EXTENDED != 0);
         if let Some(usage @ 0xe0..=0xe7) = usage {
             self.down[usize::from(usage - 0xe0)] = pressed;
         }
 
         let vk = event.vkCode as u16;
-        if matches!(vk, VK_F9 | VK_F10) {
+        if self.allow_send && matches!(vk, VK_F9 | VK_F10) {
             let index = usize::from(vk == VK_F10);
             if self.chords[index] {
                 self.chords[index] = pressed;
@@ -309,6 +262,22 @@ impl HookState {
     }
 
     fn pointer(&mut self, event: &MSLLHOOKSTRUCT, message: u32) -> bool {
+        self.check_capture_command();
+        let previous = self.last_pointer;
+        self.last_pointer = event.pt;
+        if event.flags & LLMHF_INJECTED != 0 {
+            return false;
+        }
+        if message != WM_MOUSEMOVE
+            || (!self.remote
+                && self.motion.update(
+                    event.pt.x.saturating_sub(previous.x),
+                    event.pt.y.saturating_sub(previous.y),
+                    Instant::now(),
+                ))
+        {
+            activity(&self.shortcuts);
+        }
         if message == WM_MOUSEMOVE && self.remote {
             let x = event.pt.x.saturating_sub(self.anchor.x);
             let y = event.pt.y.saturating_sub(self.anchor.y);
@@ -366,6 +335,13 @@ impl HookState {
         }
         self.remote
     }
+
+    fn check_capture_command(&mut self) {
+        if matches!(*self.commands.borrow(), Command::Local) {
+            self.remote = false;
+            self.mouse = None;
+        }
+    }
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -398,19 +374,17 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if code == 0 {
         // SAFETY: WH_MOUSE_LL provides a live MSLLHOOKSTRUCT for HC_ACTION.
         let event = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
-        if event.flags & LLMHF_INJECTED == 0
-            && HOOK_STATE.with(|state| {
-                state
-                    .try_borrow_mut()
-                    .ok()
-                    .and_then(|mut state| {
-                        state
-                            .as_mut()
-                            .map(|state| state.pointer(event, wparam as u32))
-                    })
-                    .unwrap_or(false)
-            })
-        {
+        if HOOK_STATE.with(|state| {
+            state
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut state| {
+                    state
+                        .as_mut()
+                        .map(|state| state.pointer(event, wparam as u32))
+                })
+                .unwrap_or(false)
+        }) {
             return 1;
         }
     }
@@ -418,12 +392,12 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
 }
 
-fn physical_input_held() -> bool {
+pub(super) fn physical_input_held() -> bool {
     // SAFETY: These argument-only Win32 calls read current key/button state outside a hook.
     (1..=254).any(|key| unsafe { GetAsyncKeyState(key) } < 0)
 }
 
-fn check_input_desktop() -> io::Result<()> {
+pub(super) fn check_input_desktop() -> io::Result<()> {
     // SAFETY: Only OpenInputDesktop returns an owned handle.
     let active = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
     if active.is_null() {
@@ -487,15 +461,7 @@ impl Drop for Hook {
     }
 }
 
-fn button_state(pressed: bool) -> ButtonState {
-    if pressed {
-        ButtonState::Pressed
-    } else {
-        ButtonState::Released
-    }
-}
-
-fn key_usage(scan: u32, extended: bool) -> Option<u16> {
+pub(super) fn key_usage(scan: u32, extended: bool) -> Option<u16> {
     // Set 1 scan codes map to physical positions, keeping layout interpretation on the Mac.
     const MAIN: [u8; 89] = [
         0, 0x29, 0x1e, 0x1f, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x2d, 0x2e, 0x2a,
@@ -533,7 +499,7 @@ fn key_usage(scan: u32, extended: bool) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KBDLLHOOKSTRUCT, VK_F9, VK_F10, WindowsCapture, key_usage};
+    use super::{KBDLLHOOKSTRUCT, VK_F9, VK_F10, key_usage};
 
     #[test]
     fn translates_physical_positions_and_distinguishes_extended_keys() {
@@ -548,10 +514,10 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows input desktop"]
     fn capture_thread_installs_and_releases_hooks() {
-        let capture = WindowsCapture::start().unwrap();
+        let capture = super::super::Capture::start(true).unwrap();
         assert_eq!(capture.shortcuts.borrow().start, 0);
         drop(capture);
-        let capture = WindowsCapture::start().unwrap();
+        let capture = super::super::Capture::start(false).unwrap();
         assert_eq!(capture.shortcuts.borrow().start, 0);
     }
 
@@ -560,9 +526,11 @@ mod tests {
         let (shortcuts, state) = tokio::sync::watch::channel(Default::default());
         let (events, mut captured) = tokio::sync::mpsc::channel(4);
         let mut hooks = super::HookState {
+            commands: tokio::sync::watch::channel(super::Command::Local).1,
             shortcuts,
             events,
             remote: false,
+            allow_send: true,
             chords: [false; 2],
             down: [false; 8],
             swallowed_keys: [false; 256],
@@ -572,6 +540,8 @@ mod tests {
             generation: None,
             arm_until: std::time::Instant::now(),
             mouse: None,
+            last_pointer: Default::default(),
+            motion: Default::default(),
         };
         let key = |vk, scan| KBDLLHOOKSTRUCT {
             vkCode: vk,

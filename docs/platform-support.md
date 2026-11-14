@@ -2,7 +2,7 @@
 
 Local status IPC was verified natively on macOS 27.3 (arm64). All 16 workspace tests passed at that milestone, including disconnect recovery and listener restart. Separate agent and CLI processes also passed status queries after abandoned client connections.
 
-The Mac operator confirmed the standalone Quartz injection exercise from `7cb31ef` passed on their desktop. Native tests of remote sessions, permission loss, and macOS capture remain pending.
+The Mac operator confirmed the standalone Quartz injection exercise from `7cb31ef` and the original Windows-to-Mac session on their desktop. Native macOS capture, permission loss, and bidirectional handoff remain pending.
 
 Runtime verification was performed on Windows 11 Pro build 26300 in an ordinary desktop session. The other desktop rows summarize documented API paths. Availability depends on the installed desktop and granted session capabilities.
 
@@ -11,7 +11,7 @@ The Windows operator ran the physical suppression probe. It recorded two blocked
 | Desktop | Capture and suppression | Injection | Hotkeys and edge handling | Permissions and verification |
 | --- | --- | --- | --- | --- |
 | Windows | Low-level keyboard and mouse hooks on a message-pump thread. Verified physical F9 suppression and tagged synthetic event filtering. | `SendInput` with injection flags and extra-info marker verified for F24 press/release and relative mouse move. | Ctrl+Shift+F10 delivery verified in the physical probe. `SetCursorPos` reached two pixels at a monitor's right edge. Ordinary cross-monitor motion still needs testing. | Opening the input desktop and comparing it with the current thread desktop passed. UIPI blocks injection into higher-integrity apps. Secure desktops, protected targets, mixed DPI, and default Win-key bindings still need testing. |
-| macOS | Candidate CoreGraphics active event tap for selective suppression. | A Quartz adapter posts tagged keyboard, pointer, button, and scroll events. The operator confirmed the keyboard and pointer exercise. Mouse buttons and drag behavior still need desktop testing. | Evaluate a hotkey via event tap. The injection probe clamps pointer motion to its starting display. | Posting checks Accessibility permission with `CGPreflightPostEventAccess`. Capture would require separate Input Monitoring and Secure Input testing. |
+| macOS | A Quartz session event tap filters synthesized events and suppresses local keyboard and mouse delivery while sending. Native capture verification is pending. | A Quartz adapter posts tagged keyboard, pointer, button, and scroll events. The operator confirmed the keyboard and pointer exercise. Mouse buttons and drag behavior still need desktop testing. | Ctrl+Shift+F9 and Ctrl+Shift+F10 use the tap. The receiving pointer is clamped to its starting display. | Grant Accessibility and Input Monitoring if required by the OS. Secure Input blocks or ends sharing. |
 | Linux X11 | Evaluate XInput2 events and X11 keyboard/pointer grabs. Raw observation alone leaves normal event delivery in place. | Candidate XTEST. Verify whether the chosen capture path can distinguish generated input. | Candidate `XGrabKey`, RandR geometry and `XWarpPointer`. | Requires access to an X11 session and applicable extensions. Verify grab conflicts and release on client exit. Desktop tests pending. |
 | GNOME Wayland | Candidate XDG InputCapture portal plus EIS with compositor-activated pointer barriers. | Candidate RemoteDesktop portal plus EIS. | The upstream backend lists GlobalShortcuts. The compositor controls activation and may ignore a requested cursor placement on release. | Requires detection of portal versions, consent, granted capabilities, and EIS devices. Desktop tests pending. |
 | KDE Plasma Wayland | Candidate XDG InputCapture portal plus EIS. | Candidate RemoteDesktop portal plus EIS. | KDE lists GlobalShortcuts. Verify actual bindings, activation while captured, barriers, and release coordinates. | Requires detection of portal versions, consent, and capabilities. Desktop tests pending. |
@@ -35,7 +35,7 @@ cargo run --locked -p unikvm-platform --example input_probe -- --suppress-f9
 
 For the manual run, move the mouse and press Ctrl+Shift+F10 during the ten-second window. For the suppression run, also tap F9 before the hotkey. A passing run reports at least two blocked physical F9 events and zero downstream F9 events. Only F9 is suppressed in this mode. Verify ordinary cross-monitor motion, permission changes, and elevated-window behavior on a dedicated test desktop before integrating a Windows backend.
 
-## Run the macOS injection probe
+## Run the macOS input probes
 
 From Terminal in your logged-in Mac desktop session, use the first command to check permission. If access is denied, run the permission request and follow the macOS prompt or open **System Settings → Privacy & Security → Accessibility**. Repeat the check after granting access.
 
@@ -50,6 +50,15 @@ Use the exercise command when you can focus a blank text editor during the five-
 cargo run --locked -p unikvm-platform --example input_probe -- --exercise
 ```
 
-With a US layout, verify the editor shows `Ab` and the pointer moves. The probe also posts a scroll detent, which is easiest to see in a scrollable editor. Uppercase A followed by lowercase b checks that releasing a held synthetic Shift takes effect. Key positions follow the Mac's selected layout. The adapter attempts best-effort releases on cleanup. Permission loss and process termination still need native verification before remote control is enabled.
+With a US layout, verify the editor shows `Ab` and the pointer moves. The probe also posts a scroll detent, which is easiest to see in a scrollable editor. Uppercase A followed by lowercase b checks that releasing a held synthetic Shift takes effect. Key positions follow the Mac's selected layout. The adapter attempts best-effort releases on cleanup. Permission loss and process termination still need native verification.
+
+With the agent stopped, run the capture probe from the logged-in desktop. It counts physical event types while suppressing captured keys and clicks. Focus a blank editor and follow the terminal instructions. Hold Fn too if the top row defaults to media controls. To invoke the Input Monitoring prompt for the probe, use the second command.
+
+```sh
+cargo run --locked -p unikvm-platform --example input_probe -- --capture
+cargo run --locked -p unikvm-platform --example input_probe -- --request-capture-permission
+```
+
+macOS may list the probe, terminal, and agent separately in privacy settings. Verify that local input resumes after Ctrl+Shift+F10, that the editor received no typed text during capture, and that the probe counted keys, movement, clicks, and scrolling.
 
 The probes run separately from the agents. On macOS, posting keyboard or pointer events requires the explicit exercise flag. [Apple posting permission](https://developer.apple.com/documentation/coregraphics/cgpreflightposteventaccess()), [Apple event posting](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:))

@@ -63,4 +63,13 @@ Use one crypto provider to limit the dependency and native build surface. The de
 
 These candidates stay outside the dependency graph until a milestone exercises them. Their release MSRVs are compatible with the pinned compiler where declared. Platform prerequisites and future transitive resolution still need validation. [Quinn endpoint](https://docs.rs/quinn/latest/quinn/struct.Endpoint.html), [Rustls](https://docs.rs/rustls/latest/rustls/), [mDNS service daemon](https://docs.rs/mdns-sd/latest/mdns_sd/struct.ServiceDaemon.html), [Ratatui terminal lifecycle](https://docs.rs/ratatui/latest/ratatui/fn.run.html)
 
+## Adopted for macOS capture
+
+| Crate | Stable release | Declared MSRV | License | Decision |
+| --- | --- | --- | --- | --- |
+| [core-foundation](https://docs.rs/crate/core-foundation/0.10.1/source/Cargo.toml) | 0.10.1 | 1.65 | MIT OR Apache-2.0 | Use the run loop and owned Mach port bindings to drive a session event tap. Already locked via core-graphics. |
+| [foreign-types](https://docs.rs/crate/foreign-types/0.5.0) | 0.5.0 | Unspecified | MIT OR Apache-2.0 | Use the same Quartz pointer wrapper traits as core-graphics. Already locked via core-graphics. |
+
+The event tap callback handles nullable disable notifications before wrapping a live event pointer. The pinned toolchain checks both bindings on the Apple Silicon target. [Apple event tap API](https://developer.apple.com/documentation/coregraphics/cgevent/tapcreate(tap:place:options:eventsofinterest:callback:userinfo:))
+
 Reviewed Lan Mouse's backend organization, including separate capture and emulation modules, its Windows hooks and injection paths, and its libei barrier setup. Its input crates are GPL-3.0-or-later. This workspace uses original probe code and published native APIs. [Lan Mouse capture source](https://github.com/feschber/lan-mouse/tree/main/input-capture), [emulation source](https://github.com/feschber/lan-mouse/tree/main/input-emulation), [license](https://github.com/feschber/lan-mouse/blob/main/LICENSE)

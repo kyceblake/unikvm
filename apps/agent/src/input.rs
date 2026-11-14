@@ -3,9 +3,9 @@ use tokio::sync::watch;
 use unikvm_config::{InputConfig, InputMode};
 use unikvm_network::{PeerEndpoint, identity::Fingerprint};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod receive;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod send;
 
 pub struct Control {
@@ -16,10 +16,8 @@ pub struct Control {
 
 impl Control {
     pub fn new(config: &InputConfig, endpoint: Option<&PeerEndpoint>) -> Result<Self> {
-        let supported = matches!(config.mode, InputMode::Send) && cfg!(target_os = "windows")
-            || matches!(config.mode, InputMode::Receive) && cfg!(target_os = "macos");
-        if !supported {
-            bail!("input control currently supports send on Windows and receive on macOS");
+        if !cfg!(any(target_os = "windows", target_os = "macos")) {
+            bail!("input sharing is available on Windows and macOS");
         }
         let peer = config.peer_fingerprint.parse()?;
         let connections = endpoint
@@ -32,16 +30,123 @@ impl Control {
         })
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub async fn run(self) -> Result<()> {
+        use tracing::info;
+        use unikvm_platform::input::Capture;
+
+        let focus = Cell::new(FocusState::Local);
+        let allow_send = self.mode != InputMode::Receive;
+        let mut capture = Capture::start(allow_send).context("start local input monitor")?;
+        if allow_send {
+            info!(
+                "input ready: Ctrl+Shift+F9 sends to the peer and Ctrl+Shift+F10 returns locally"
+            );
+        } else {
+            info!("ready to receive peer input");
+        }
         match self.mode {
-            #[cfg(target_os = "windows")]
-            InputMode::Send => send::run(self.connections, self.peer).await,
-            #[cfg(target_os = "macos")]
-            InputMode::Receive => receive::run(self.connections, self.peer).await,
-            _ => {
-                let _ = (self.connections, self.peer);
-                bail!("unsupported input mode")
+            InputMode::Send => send::run(&mut capture, self.connections, self.peer, &focus).await,
+            InputMode::Receive => {
+                receive::run(
+                    capture.shortcuts.clone(),
+                    self.connections,
+                    self.peer,
+                    &focus,
+                )
+                .await
+            }
+            InputMode::Bidirectional => {
+                let signals = capture.shortcuts.clone();
+                tokio::select! {
+                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus) => result,
+                    result = receive::run(signals, self.connections, self.peer, &focus) => result,
+                }
             }
         }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    pub async fn run(self) -> Result<()> {
+        let _ = (self.connections, self.peer, self.mode);
+        bail!("input sharing is available on Windows and macOS")
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use {
+    std::cell::Cell,
+    unikvm_core::focus::{ControlSession, FocusEvent, FocusState},
+};
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+struct Focus<'a> {
+    state: &'a Cell<FocusState>,
+    session: ControlSession,
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl<'a> Focus<'a> {
+    fn reserve(
+        state: &'a Cell<FocusState>,
+        session: ControlSession,
+        direction: FocusEvent,
+    ) -> Option<Self> {
+        if state.get() != FocusState::Local {
+            return None;
+        }
+        let next = state.get().transition(direction);
+        debug_assert_ne!(next, FocusState::Local);
+        state.set(next);
+        Some(Self { state, session })
+    }
+
+    fn transition(&self, event: FocusEvent) -> FocusState {
+        let next = self.state.get().transition(event);
+        self.state.set(next);
+        next
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+impl Drop for Focus<'_> {
+    fn drop(&mut self) {
+        self.transition(FocusEvent::EndSession(self.session));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unikvm_core::{device::DeviceId, focus::SessionId};
+
+    #[test]
+    fn simultaneous_requests_reserve_each_local_focus_and_neither_can_receive() {
+        let left = Cell::new(FocusState::Local);
+        let right = Cell::new(FocusState::Local);
+        let session = ControlSession {
+            peer: DeviceId([2; 16]),
+            id: SessionId(1),
+        };
+        let first = Focus::reserve(&left, session, FocusEvent::Request(session)).unwrap();
+        let second = Focus::reserve(&right, session, FocusEvent::Request(session)).unwrap();
+        assert!(Focus::reserve(&left, session, FocusEvent::AcceptIncoming(session)).is_none());
+        assert!(Focus::reserve(&right, session, FocusEvent::AcceptIncoming(session)).is_none());
+        drop((first, second));
+
+        let sending = Focus::reserve(&right, session, FocusEvent::Request(session)).unwrap();
+        let receiving =
+            Focus::reserve(&left, session, FocusEvent::AcceptIncoming(session)).unwrap();
+        assert_eq!(
+            sending.transition(FocusEvent::Grant(session)),
+            FocusState::Sending(session)
+        );
+        assert_eq!(
+            receiving.transition(FocusEvent::LocalActivity),
+            FocusState::Local
+        );
+        drop((receiving, sending));
+        assert_eq!(left.get(), FocusState::Local);
+        assert_eq!(right.get(), FocusState::Local);
     }
 }

@@ -1,11 +1,18 @@
 # Progress
 
+## 2026-11-14 — Bidirectional Windows and macOS input
+
+- Added `[input] mode = "bidirectional"` for a selected pinned peer. Each machine reserves local focus for one input session. Physical keyboard, mouse, or trackpad activity on the receiver ends sharing and restores local control. The shortcut starts the next session in either direction.
+- Implemented macOS capture through a Quartz session tap and Windows injection through `SendInput`. Both adapters filter synthetic events. The receiver attempts to release held keys and buttons before it grants another session.
+- Windows formatting, strict Clippy, workspace build, all 36 standard tests, both native input adapter tests, and the standalone Windows input probe passed. Strict Clippy passed for Apple Silicon and x86-64 Linux as compile-time checks. Cargo deny and the cached RustSec audit passed.
+- Next, run the [Mac capture probe](platform-support.md#run-the-macos-input-probes) and the [two-desktop handoff walkthrough](input-control.md). Verify trackpad motion, takeover while a remote modifier or mouse button is held, and recovery after stopping either agent. Native macOS capture, hard receiver termination with held input, and display-edge switching remain open.
+
 ## 2026-11-14 — Opt-in Windows-to-Mac input session
 
 - The Windows operator verified physical F9 suppression and Ctrl+Shift+F10 delivery. The Mac injection probe had already passed on the target desktop.
 - Added one explicit input peer per agent, a reliable QUIC input stream with a grant and renewable lease, Windows capture with a bounded queue and local watchdog, and Mac synthetic key and button release on stream cleanup. Ctrl+Shift+F9 starts a session and Ctrl+Shift+F10 returns to Windows.
 - Windows formatting, strict Clippy, workspace build, and all 32 standard tests passed. The input stream test exercised both QUIC connection roles. The Windows hook installation and mDNS LAN tests passed separately. Cross-target strict Clippy passed for Apple Silicon macOS and x86-64 Linux.
-- The next check is the [two-desktop walkthrough](input-control.md), including held-input cleanup when either side disconnects. Mac-to-Windows input, Mac local activity revocation, and recovery after the Mac process is killed while injecting remain open.
+- The operator verified the Windows-to-Mac session on the paired desktops. Held-input cleanup after hard termination still needs verification.
 
 ## 2026-11-14 — Phase 3 native input feasibility
 

@@ -16,7 +16,7 @@ Installation identities use self-signed Ed25519 certificates. The device ID is t
 
 ## LAN requirements for later phases
 
-Input control is disabled unless the local config explicitly selects a mode and a pinned peer fingerprint in `[input]`. The Mac grants the session only on that authenticated peer's connection and checks its input posting permission. Fixed frames, a bounded capture queue, and a renewable lease limit the input session. Logs record session lifecycle and errors without recording input events.
+Input control is disabled unless the local config explicitly selects a mode and a pinned peer fingerprint in `[input]`. Each receiver checks local focus and desktop access before granting an input session on the selected authenticated connection. Physical activity on the receiver revokes the grant. Each native backend filters its own synthetic events to prevent feedback. Fixed frames, a bounded capture queue, and a renewable lease limit the input session. Logs record session lifecycle and errors without recording input events.
 
 Treat mDNS, IP addresses, hostnames, and advertised IDs as untrusted hints. Pairing requires explicit approval and verification of both peer identities using a reviewed certificate fingerprint workflow or vetted PAKE. Bind a persistent random device ID to the verified certificate identity. Reconnect only against pinned trust and support revocation. Give input, clipboard, and file receipt separate permissions.
 
