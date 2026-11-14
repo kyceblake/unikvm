@@ -46,6 +46,10 @@ pub struct MacInputSink {
 impl MacInputSink {
     pub fn enter_edge(&mut self, edge: EdgeLayout, height: u16) -> io::Result<()> {
         let point = edge.place(height)?;
+        self.sync_edge_position(point)
+    }
+
+    fn sync_edge_position(&mut self, point: Point) -> io::Result<()> {
         self.display = CGDisplay::main();
         self.bounds = self.display.bounds();
         self.pointer = CGPoint::new(f64::from(point.x), f64::from(point.y));
@@ -53,18 +57,23 @@ impl MacInputSink {
         self.move_pointer(0, 0)
     }
 
-    pub fn exit_edge(&self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
+    pub fn exit_edge(&mut self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
         if self.keys.contains(&true) || self.buttons.contains(&true) {
             return Ok(None);
         }
-        Ok(edge.crossing(
+        let height = edge.crossing(
             Point {
                 x: self.pointer.x.floor() as i32,
                 y: self.pointer.y.floor() as i32,
             },
             dx,
             dy,
-        ))
+        );
+        if let Some(height) = height {
+            let point = edge.place_exit(height)?;
+            self.sync_edge_position(point)?;
+        }
+        Ok(height)
     }
 
     /// Queries the current process's permission without showing a prompt.

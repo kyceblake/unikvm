@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-15 — Complete fast crossing before edge return
+
+- Fixed a discarded crossing step: the receiver could report an edge return before applying the movement that reached it, leaving the visible cursor far inside the display. Both native sinks now place the cursor at the exact exit edge and interpolated crossing height before returning the handoff result. The Mac also updates its cached pointer and posts the tagged position.
+- Schedule receiver hiding before the return write, so a stalled write does not delay the hide request; restore visibility if that write fails. The native monitor still applies visibility asynchronously, so strict cross-machine scanout ordering is not guaranteed.
+- Apple Silicon formatting, strict Clippy, all 40 standard workspace tests, and workspace build passed. A native regression failed before the fix with the cursor 639 pixels inside the display, then passed for both horizontal edges with diagonal overshoot. The native receiver hide/restore test also passed. Windows runtime verification remains pending.
+- Restarted the paired Mac client. The operator's initial fast Windows-mouse round-trip retest looked fixed; repeated physical crossings remain useful to confirm visual behavior under different speeds.
+
 ## 2026-11-14 — Hide the receiver's cursor on edge return
 
 - The operator reported that when the Windows mouse crossed back to Windows, the Mac continued to show its cursor at the edge.

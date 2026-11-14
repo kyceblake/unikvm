@@ -52,6 +52,13 @@ impl EdgeLayout {
         Ok(point)
     }
 
+    /// Complete the visible crossing before the receiver reports control returned.
+    pub(super) fn place_exit(self, height: u16) -> io::Result<Point> {
+        let point = native::primary()?.horizontal_entry(self.side, height, 0);
+        native::place(point)?;
+        Ok(point)
+    }
+
     pub(super) fn entry(self, height: u16) -> io::Result<Point> {
         // Refresh the destination coordinates if its mode changed since startup.
         Ok(native::primary()?.horizontal_entry(self.side, height, 2))
@@ -89,6 +96,39 @@ impl EdgeTrigger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive desktop with a free primary horizontal edge"]
+    fn fast_exit_places_cursor_at_crossing_before_reporting_return() {
+        struct Restore(Point);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = native::place(self.0);
+            }
+        }
+        let _restore = Restore(native::position().unwrap());
+        let mut checked = 0;
+        for side in [Edge::Left, Edge::Right] {
+            let edge = EdgeLayout::primary(side).unwrap();
+            let start = edge.display.horizontal_entry(side, u16::MAX / 3, u32::MAX);
+            let boundary = edge.display.horizontal_entry(side, u16::MAX / 3, 0);
+            let distance = i64::from(boundary.x) - i64::from(start.x);
+            let dx = i32::try_from(distance + distance.signum() * 128).unwrap();
+            let dy = 47;
+            let Some(expected_height) = edge.crossing(start, dx, dy) else {
+                continue; // An adjacent local display owns this edge.
+            };
+            native::place(start).unwrap();
+            let mut sink = super::super::InputSink::new().unwrap();
+            assert_eq!(sink.exit_edge(edge, dx, dy).unwrap(), Some(expected_height));
+            assert_eq!(
+                native::position().unwrap(),
+                edge.display.horizontal_entry(side, expected_height, 0)
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no free primary horizontal edge to test");
+    }
 
     #[test]
     #[ignore = "requires an interactive input desktop"]

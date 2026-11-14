@@ -34,11 +34,15 @@ impl WindowsInputSink {
         Ok(())
     }
 
-    pub fn exit_edge(&self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
+    pub fn exit_edge(&mut self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
         if self.keys.contains(&true) || self.buttons.contains(&true) {
             return Ok(None);
         }
-        Ok(edge.crossing(super::windows_edge::position()?, dx, dy))
+        let height = edge.crossing(super::windows_edge::position()?, dx, dy);
+        if let Some(height) = height {
+            edge.place_exit(height)?;
+        }
+        Ok(height)
     }
 
     pub(super) fn pointer_display(&self) -> super::windows_motion::PointerDisplay {

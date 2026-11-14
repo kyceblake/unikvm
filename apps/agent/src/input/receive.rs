@@ -137,13 +137,20 @@ async fn receive(
     sink.release_all().context("release synthetic input")?;
     let (local, height) = result?;
     if let Some(height) = height {
-        timeout(
+        // Hide at the completed crossing before the network write can stall or
+        // the sender resumes its pointer. Failed returns must reveal it again.
+        control.hide_after_edge_return(baseline);
+        let reported = timeout(
             ADMISSION_TIMEOUT,
             send.write_all(&input::edge_return(height)),
         )
         .await
-        .context("report return across display edge")??;
-        control.hide_after_edge_return(baseline);
+        .context("report return across display edge")
+        .and_then(|result| result.context("send return across display edge"));
+        if let Err(error) = reported {
+            control.show_idle_cursor();
+            return Err(error);
+        }
         info!("peer input returned across the display edge");
     } else if local {
         focus.transition(FocusEvent::LocalActivity);
