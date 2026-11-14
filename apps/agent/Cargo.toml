@@ -23,3 +23,6 @@ unikvm-protocol.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+unikvm-clipboard.workspace = true

@@ -29,6 +29,13 @@ pub struct Config {
     pub log_level: LogLevel,
     pub network: Option<NetworkConfig>,
     pub input: Option<InputConfig>,
+    pub clipboard: Option<ClipboardConfig>,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardConfig {
+    pub peer_fingerprint: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -86,6 +93,7 @@ impl Default for Config {
             log_level: LogLevel::default(),
             network: None,
             input: None,
+            clipboard: None,
         }
     }
 }
@@ -114,6 +122,8 @@ pub enum ConfigError {
     DiscoveryAddress,
     #[error("input.peer_fingerprint must identify a peer already trusted in [network]")]
     InputPeer,
+    #[error("clipboard.peer_fingerprint must identify a peer already trusted in [network]")]
+    ClipboardPeer,
     #[error("input.peer_side requires bidirectional input mode")]
     InputLayout,
     #[error("input.allow_locked_receive requires receive or bidirectional input mode")]
@@ -196,15 +206,27 @@ impl Config {
                 return Err(ConfigError::PeerAddressRequired);
             }
         }
-        if let Some(input) = &config.input
-            && !config.network.as_ref().is_some_and(|network| {
-                network.peers.iter().any(|peer| {
-                    peer.fingerprint
-                        .eq_ignore_ascii_case(&input.peer_fingerprint)
-                })
+        let trusted = |fingerprint: &str| {
+            config.network.as_ref().is_some_and(|network| {
+                network
+                    .peers
+                    .iter()
+                    .any(|peer| peer.fingerprint.eq_ignore_ascii_case(fingerprint))
             })
+        };
+        if config
+            .input
+            .as_ref()
+            .is_some_and(|input| !trusted(&input.peer_fingerprint))
         {
             return Err(ConfigError::InputPeer);
+        }
+        if config
+            .clipboard
+            .as_ref()
+            .is_some_and(|clipboard| !trusted(&clipboard.peer_fingerprint))
+        {
+            return Err(ConfigError::ClipboardPeer);
         }
         Ok(config)
     }
@@ -286,6 +308,28 @@ mod tests {
         assert!(matches!(
             Config::parse(&format!("{base}{network}{receive}{edge}")),
             Err(ConfigError::InputLayout)
+        ));
+    }
+
+    #[test]
+    fn clipboard_is_opt_in_and_requires_its_own_pinned_peer() {
+        let network = "
+schema_version = 1
+[network]
+listen = '127.0.0.1:24800'
+identity = 'identity.bin'
+peer = '127.0.0.1:24801'
+peer_certificate = 'peer.der'
+peer_fingerprint = 'AB'
+";
+        assert!(Config::parse(network).unwrap().clipboard.is_none());
+        let enabled = format!("{network}[clipboard]\npeer_fingerprint = 'ab'");
+        let config = Config::parse(&enabled).unwrap();
+        assert!(config.clipboard.is_some());
+        assert!(config.input.is_none());
+        assert!(matches!(
+            Config::parse(&enabled.replace("'ab'", "'cd'")),
+            Err(ConfigError::ClipboardPeer)
         ));
     }
 

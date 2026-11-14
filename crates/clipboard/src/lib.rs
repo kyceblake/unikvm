@@ -40,15 +40,19 @@ impl Revisions {
         Ok(update)
     }
 
-    /// Returns true only for a newer update from the authenticated peer.
-    /// The caller applies accepted updates in order and can retry a failed write.
+    /// Record a newer update after a successful native write.
     pub fn accept_remote(&mut self, update: &TextUpdate) -> bool {
-        let revision = update.revision();
-        if revision.origin != self.peer || self.latest.is_some_and(|latest| revision <= latest) {
+        if !self.is_new_remote(update) {
             return false;
         }
-        self.latest = Some(revision);
+        self.latest = Some(update.revision());
         true
+    }
+
+    /// Check before writing so a busy native clipboard can be retried.
+    pub fn is_new_remote(&self, update: &TextUpdate) -> bool {
+        let revision = update.revision();
+        revision.origin == self.peer && self.latest.is_none_or(|latest| revision > latest)
     }
 }
 

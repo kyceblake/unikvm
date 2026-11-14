@@ -23,6 +23,11 @@ pub async fn run(config: &Config) -> Result<()> {
         .as_ref()
         .map(|input| crate::input::Control::new(input, network.as_ref()))
         .transpose()?;
+    let _clipboard = config
+        .clipboard
+        .as_ref()
+        .map(|config| crate::clipboard::start(config, network.as_ref()))
+        .transpose()?;
     let peer_service = network.map(|endpoint| {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(endpoint.run_until(
@@ -54,6 +59,8 @@ pub async fn run(config: &Config) -> Result<()> {
         }
     }
     .await;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    drop(_clipboard);
     if let Some((stop, worker)) = peer_service {
         let _ = stop.send(());
         worker.await.context("join peer transport task")?;

@@ -10,7 +10,7 @@ mod motion;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-mod macos_capture;
+pub(crate) mod macos_capture;
 #[cfg(target_os = "macos")]
 mod macos_cursor;
 #[cfg(target_os = "macos")]
@@ -18,10 +18,10 @@ mod macos_edge;
 #[cfg(target_os = "macos")]
 mod macos_motion;
 #[cfg(target_os = "macos")]
-mod macos_session;
+pub(crate) mod macos_session;
 
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
 #[cfg(target_os = "windows")]
 mod windows_cursor;
 #[cfg(target_os = "windows")]

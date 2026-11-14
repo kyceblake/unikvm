@@ -172,6 +172,10 @@ impl PeerEndpoint {
             .map(|peer| peer.connection.subscribe())
     }
 
+    pub fn fingerprint(&self) -> Fingerprint {
+        self.own
+    }
+
     /// Each pair has one connection, initiated by the lower full fingerprint.
     pub async fn run_until(
         self,
@@ -288,8 +292,10 @@ fn transport_config() -> Arc<TransportConfig> {
     transport
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
         .max_concurrent_uni_streams(VarInt::from_u32(1))
-        .stream_receive_window(VarInt::from_u32(256))
-        .receive_window(VarInt::from_u32(256))
+        // Clipboard frames can share the connection with latency-sensitive input.
+        .stream_receive_window(VarInt::from_u32(16 * 1024))
+        .receive_window(VarInt::from_u32(32 * 1024))
+        .send_window(128 * 1024)
         .datagram_receive_buffer_size(None)
         .datagram_send_buffer_size(0)
         .keep_alive_interval(Some(Duration::from_secs(3)))

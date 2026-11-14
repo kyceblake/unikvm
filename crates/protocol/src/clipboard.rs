@@ -7,6 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use unikvm_core::device::DeviceId;
 
 const HEADER: &[u8; 8] = b"CLIP/1\r\n";
+pub const READY: &[u8; 8] = b"CLIP/1\n\n";
 pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 
 /// Order concurrent writes by logical counter, then by device ID.

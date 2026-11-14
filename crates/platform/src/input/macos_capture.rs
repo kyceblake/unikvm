@@ -771,7 +771,7 @@ fn key_usage(code: u16) -> Option<KeyUsage> {
         .find(|&usage| key_code(usage) == Some(code))
 }
 
-pub(super) fn secure_input() -> bool {
+pub(crate) fn secure_input() -> bool {
     // SAFETY: This argument-free API reads the system Secure Event Input state.
     unsafe { IsSecureEventInputEnabled() != 0 }
 }

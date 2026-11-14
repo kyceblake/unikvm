@@ -61,7 +61,7 @@ fn own_console(
     on_console == Some(true) && login_done == Some(true) && uid == Some(i64::from(own_uid))
 }
 
-pub(super) fn capture_unavailable() -> bool {
+pub(crate) fn capture_unavailable() -> bool {
     let session = current();
     !session.eligible || session.locked
 }

@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Phase 4 native clipboard sync
+
+- Added a separate `[clipboard]` opt-in for one pinned peer on Windows and macOS. A versioned readiness exchange lets two enabled agents share new text without sending whatever was on the clipboard at startup.
+- Native adapters track clipboard ownership changes, skip supported sensitive-content markers, and mark imported text to avoid echo. The clipboard worker stays independent of keyboard and mouse handoff. See the [clipboard setup and paired test](clipboard-sync.md).
+- Windows formatting, strict Clippy, build, and 53 workspace tests passed, including a bidirectional transfer near the 64 KiB limit over an authenticated loopback connection. The native Windows regression verified Unicode clipboard writes, suppression of received text, and rejection of a stale write. Linux cross-target Clippy and Cargo deny passed. The Apple Silicon cross-check was blocked by a Windows access-denied error when compiling the new AppKit dependencies.
+- Next, build on a logged-in Mac, enable clipboard sync on both machines, and verify live copy/paste in both directions.
+
 ## 2026-11-14 — Phase 4 plain-text clipboard foundation
 
 - Kept the fixed two-display handoff for the first release. Moved monitor enumeration, layout synchronization, and the layout editor to Phase 7 after release. Clipboard, file transfers, and release hardening are now Phases 4 through 6.

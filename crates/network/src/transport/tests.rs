@@ -347,3 +347,58 @@ async fn either_authenticated_endpoint_can_open_an_input_stream() {
     drop((a_connection, b_connection));
     tokio::join!(a_run.stop(), b_run.stop());
 }
+
+#[tokio::test]
+async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authenticated_link() {
+    use std::num::NonZeroU64;
+    use unikvm_protocol::clipboard::{self, MAX_TEXT_BYTES, READY, Revision, TextUpdate};
+
+    let [a_addr, b_addr] = addresses();
+    let a = Identity::generate().unwrap();
+    let b = Identity::generate().unwrap();
+    let a_endpoint =
+        PeerEndpoint::bind(a_addr, false, &a, vec![(approve(&b), Some(b_addr))]).unwrap();
+    let b_endpoint =
+        PeerEndpoint::bind(b_addr, false, &b, vec![(approve(&a), Some(a_addr))]).unwrap();
+    let mut a_link = a_endpoint.connection(b.fingerprint()).unwrap();
+    let mut b_link = b_endpoint.connection(a.fingerprint()).unwrap();
+    let mut a_run = Running::start(a_endpoint);
+    let mut b_run = Running::start(b_endpoint);
+    tokio::join!(
+        a_run.next(PeerEvent::Connected(b.fingerprint())),
+        b_run.next(PeerEvent::Connected(a.fingerprint())),
+    );
+    let a_link = a_link.borrow_and_update().clone().unwrap();
+    let b_link = b_link.borrow_and_update().clone().unwrap();
+
+    let exchange = |connection: quinn::Connection, origin, expected| async move {
+        let mut send = connection.open_uni().await.unwrap();
+        send.write_all(READY).await.unwrap();
+        let mut recv = connection.accept_uni().await.unwrap();
+        let mut ready = [0; READY.len()];
+        recv.read_exact(&mut ready).await.unwrap();
+        assert_eq!(&ready, READY);
+        let text = "日本".repeat(MAX_TEXT_BYTES / 6);
+        let revision = Revision {
+            counter: NonZeroU64::MIN,
+            origin,
+        };
+        let update = TextUpdate::new(revision, text).unwrap();
+        let (sent, received) = tokio::join!(
+            clipboard::write(&mut send, &update),
+            clipboard::read(&mut recv),
+        );
+        sent.unwrap();
+        let received = received.unwrap();
+        assert_eq!(received.revision().origin, expected);
+        assert!(received.text() == update.text());
+    };
+    let a_id = a.fingerprint().device_id();
+    let b_id = b.fingerprint().device_id();
+    timeout(WAIT, async {
+        tokio::join!(exchange(a_link, a_id, b_id), exchange(b_link, b_id, a_id));
+    })
+    .await
+    .unwrap();
+    tokio::join!(a_run.stop(), b_run.stop());
+}

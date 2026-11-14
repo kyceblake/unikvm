@@ -25,6 +25,9 @@ core-graphics = { version = "0.25.0", features = ["highsierra"] }
 foreign-types = "0.5.0"
 if-addrs = "0.15.0"
 mdns-sd = { version = "0.21.7", default-features = false, features = ["async"] }
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring"] }
 ring = "0.17.14"
@@ -40,6 +43,7 @@ tracing-subscriber = "0.3.23"
 windows-sys = "0.61.2"
 zeroize = "1.9.1"
 
+unikvm-clipboard = { path = "crates/clipboard" }
 unikvm-config = { path = "crates/config" }
 unikvm-core = { path = "crates/core" }
 unikvm-network = { path = "crates/network" }

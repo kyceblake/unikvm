@@ -510,7 +510,7 @@ pub(super) fn physical_input_held() -> bool {
     (1..=254).any(|key| unsafe { GetAsyncKeyState(key) } < 0)
 }
 
-pub(super) fn check_input_desktop() -> io::Result<()> {
+pub(crate) fn check_input_desktop() -> io::Result<()> {
     // SAFETY: Only OpenInputDesktop returns an owned handle.
     let active = unsafe { OpenInputDesktop(0, 0, DESKTOP_READOBJECTS) };
     if active.is_null() {
