@@ -2,7 +2,7 @@ use std::{cell::Cell, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior, interval, sleep_until, timeout, timeout_at};
+use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at};
 use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
 use unikvm_core::geometry::Edge;
@@ -53,12 +53,12 @@ pub async fn run(
             continue;
         };
         let result = control(capture, connection, &focus, session, shortcut, side).await;
+        requested = capture.shortcuts.borrow_and_update().start;
+        drop(focus);
         match result.as_ref() {
             Ok(Some(height)) => capture.return_from_edge(*height),
             _ => capture.local(),
         }
-        drop(focus);
-        requested = capture.shortcuts.borrow_and_update().start;
         if let Err(error) = result {
             warn!(%error, "input session ended");
         }
@@ -74,27 +74,38 @@ async fn control(
     shortcut: Shortcut,
     side: Option<Edge>,
 ) -> Result<Option<u16>> {
-    let (mut send, mut recv) = tokio::select! {
+    let (mut send, mut recv, initial_heartbeat) = tokio::select! {
         biased;
         () = wait_stop(&mut capture.shortcuts, shortcut.stop) => return Ok(None),
         setup = timeout(LEASE, async {
             let (mut send, mut recv) = connection.open_bi().await?;
-            if let Some((side, height)) = side.zip(shortcut.edge_height) {
-                send.write_all(&input::edge_packet(side, height)).await?;
+            let initial_heartbeat = if let Some((side, height)) = side.zip(shortcut.edge_height) {
+                let sent = Instant::now();
+                send.write_all(&input::edge_start(side, height)).await?;
+                Some(sent)
             } else {
                 send.write_all(REQUEST).await?;
-            }
+                None
+            };
             let mut reply = [0];
             recv.read_exact(&mut reply).await?;
             ensure!(reply[0] == GRANT, "peer did not grant this input session");
-            Ok::<_, anyhow::Error>((send, recv))
+            Ok::<_, anyhow::Error>((send, recv, initial_heartbeat))
         }) => setup.context("request input grant timed out")??,
     };
     ensure!(
         focus.transition(FocusEvent::Grant(session)) == FocusState::Sending(session),
         "input grant no longer matches"
     );
-    let result = active(capture, &mut send, &mut recv, session.id.0, shortcut).await;
+    let result = active(
+        capture,
+        &mut send,
+        &mut recv,
+        session.id.0,
+        shortcut,
+        initial_heartbeat,
+    )
+    .await;
     if let Ok(Some(_)) = result {
         let _ = send.finish();
         let _ = recv.stop(0u32.into());
@@ -130,15 +141,21 @@ async fn active(
     recv: &mut quinn::RecvStream,
     generation: u64,
     shortcut: Shortcut,
+    initial_heartbeat: Option<Instant>,
 ) -> Result<Option<u16>> {
     let stop = shortcut.stop;
-    let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+    let mut heartbeat = interval_at(
+        initial_heartbeat.map_or_else(Instant::now, |sent| sent + HEARTBEAT_INTERVAL),
+        HEARTBEAT_INTERVAL,
+    );
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
-    let deadline = sleep_until(Instant::now() + LEASE);
+    let deadline = sleep_until(initial_heartbeat.unwrap_or_else(Instant::now) + LEASE);
     tokio::pin!(deadline);
-    let mut sequence = 0u8;
+    let mut sequence = u8::from(initial_heartbeat.is_some());
     let mut pending = [None; HEARTBEAT_TOKENS as usize];
+    pending[0] = initial_heartbeat;
     let mut started = false;
+    let mut peer_stopped = false;
 
     loop {
         let mut ack = [0];
@@ -163,33 +180,51 @@ async fn active(
                 let sent = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected peer input acknowledgment")?;
                 let expires = sent + LEASE;
                 ensure!(expires > Instant::now(), "peer input acknowledgment arrived after the lease expired");
-                if expires > deadline.deadline() {
-                    deadline.as_mut().reset(expires);
-                }
-                capture.renew_session(generation, expires.into_std(), shortcut.edge_height.is_some());
-                if !started {
-                    info!("sending input to peer");
-                    started = true;
+                if !peer_stopped {
+                    if expires > deadline.deadline() {
+                        deadline.as_mut().reset(expires);
+                    }
+                    capture.renew_session(generation, expires.into_std(), shortcut.edge_height.is_some());
+                    if !started {
+                        info!("sending input to peer");
+                        started = true;
+                    }
                 }
                 continue;
             }
-            _ = heartbeat.tick() => {
+            _ = heartbeat.tick(), if !peer_stopped => {
                 let token = sequence;
                 sequence = (sequence + 1) % HEARTBEAT_TOKENS;
                 pending[usize::from(token)] = Some(Instant::now());
                 Frame::Heartbeat(token)
             },
-            event = capture.events.recv() => Frame::Event(event.context("local input capture stopped")?),
+            event = capture.events.recv(), if !peer_stopped => Frame::Event(event.context("local input capture stopped")?),
         };
 
-        tokio::select! {
+        let written = tokio::select! {
             biased;
             () = wait_stop(&mut capture.shortcuts, stop) => {
                 // The write could have started, so reset instead of attempting a release frame.
                 let _ = send.reset(0u32.into());
                 anyhow::bail!("input capture stopped during a stream write");
             }
-            result = timeout(WRITE_TIMEOUT, input::write(send, frame)) => result.context("input stream stalled")??,
+            result = timeout(WRITE_TIMEOUT, input::write(send, frame)) => result.context("input stream stalled")?,
+        };
+        if let Err(error) = written {
+            if shortcut.edge_height.is_some()
+                && matches!(
+                    error.get_ref().and_then(|source| source.downcast_ref()),
+                    Some(quinn::WriteError::Stopped(_))
+                )
+            {
+                // STOP_SENDING can arrive before the ordered return position.
+                // Keep reading briefly without extending the capture lease.
+                peer_stopped = true;
+                let until = deadline.deadline().min(Instant::now() + WRITE_TIMEOUT);
+                deadline.as_mut().reset(until);
+            } else {
+                return Err(error.into());
+            }
         }
     }
 }

@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-11-14 — Lower-latency edge handoff and cursor visibility
+
+- Send the first heartbeat with the edge request to remove a separate network round trip. Capture still starts after a matching grant and fresh acknowledgment. Initialize display pacing once the cursor is on the receiving display.
+- Wake the native capture worker directly when control changes. A mapped return rearms the shared edge immediately. The sender still reads the return position if QUIC stops its write side first.
+- Windows hides its parked cursor with a scoped, non-activating window. macOS continues to scope hiding to capture. The Windows desktop regression verified a blank cursor while forwarding, a visible cursor at the mapped return position, and unchanged foreground focus.
+- Windows formatting, strict Clippy, workspace build, 45 workspace tests, five native desktop tests, and the input probe passed. Apple Silicon and x86-64 Linux passed cross-target strict Clippy.
+- Next, verify fast back-and-forth crossings on the paired Windows and Mac desktops and check that only the active pointer remains visible during forwarding.
+
 ## 2026-11-14 — Edge handoff cursor placement
 
 - The first paired test confirmed edge sessions and return messages. The operator reported a visible center jump during handoff.

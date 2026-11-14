@@ -21,6 +21,8 @@ mod macos_motion;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
+mod windows_cursor;
+#[cfg(target_os = "windows")]
 mod windows_edge;
 #[cfg(target_os = "windows")]
 mod windows_motion;

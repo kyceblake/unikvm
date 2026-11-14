@@ -19,6 +19,8 @@ const QUEUE_SIZE: usize = 256;
 pub(super) const POLL: Duration = Duration::from_millis(20);
 pub(super) const ARM_DELAY: Duration = Duration::from_secs(3);
 
+pub(super) type MonitorWake = Box<dyn Fn() + Send + Sync>;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Shortcut {
     pub start: u64,
@@ -43,6 +45,7 @@ pub(super) enum Command {
 
 pub struct Capture {
     commands: watch::Sender<Command>,
+    wake: MonitorWake,
     pub shortcuts: watch::Receiver<Shortcut>,
     pub events: mpsc::Receiver<InputEvent>,
     worker: Option<JoinHandle<()>>,
@@ -79,9 +82,10 @@ impl Capture {
                     let _ = initialized.try_send(Err(error));
                 }
             })?;
-        ready.recv().map_err(io::Error::other)??;
+        let wake = ready.recv().map_err(io::Error::other)??;
         Ok(Self {
             commands,
+            wake,
             shortcuts,
             events: input,
             worker: Some(worker),
@@ -94,30 +98,36 @@ impl Capture {
     }
 
     pub fn renew_session(&self, generation: u64, expires: Instant, edge: bool) {
+        let wake = !matches!(*self.commands.borrow(), Command::Remote { generation: current, .. } if current == generation);
         self.commands.send_replace(Command::Remote {
             generation,
             expires,
             edge,
         });
+        if wake {
+            (self.wake)();
+        }
     }
 
     pub fn local(&self) {
         self.commands.send_replace(Command::Local {
             return_height: None,
         });
+        (self.wake)();
     }
 
     pub fn return_from_edge(&self, height: u16) {
         self.commands.send_replace(Command::Local {
             return_height: Some(height),
         });
+        (self.wake)();
     }
 }
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        self.local();
         self.stop.store(true, Relaxed);
+        self.local();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

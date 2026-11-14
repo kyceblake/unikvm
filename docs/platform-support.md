@@ -35,6 +35,12 @@ cargo run --locked -p unikvm-platform --example input_probe -- --suppress-f9
 
 For the manual run, move the mouse and press Ctrl+Shift+F10 during the ten-second window. For the suppression run, also tap F9 before the hotkey. A passing run reports at least two blocked physical F9 events and zero downstream F9 events. Only F9 is suppressed in this mode. Verify ordinary cross-monitor motion, permission changes, and elevated-window behavior on a dedicated test desktop before integrating a Windows backend.
 
+On the ordinary Windows desktop, the sender hides its parked pointer with a nearly transparent, non-activating window under the pointer. The capture worker owns that window and releases it on return. With the mouse stationary and no keys held, the native regression checks that capture installs the blank cursor, then restores a visible cursor at the left edge without changing the foreground window. Test fullscreen and elevated apps separately. [Microsoft cursor ownership](https://learn.microsoft.com/windows/win32/menurc/about-cursors)
+
+```powershell
+cargo test --locked -p unikvm-platform parked_cursor_hides_and_restores_without_activation -- --ignored --nocapture
+```
+
 ## Run the macOS input probes
 
 From Terminal in your logged-in Mac desktop session, use the first command to check permission. If access is denied, run the permission request and follow the macOS prompt or open **System Settings → Privacy & Security → Accessibility**. Repeat the check after granting access.

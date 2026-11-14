@@ -30,6 +30,14 @@ pub fn edge_packet(side: Edge, height: u16) -> [u8; 11] {
     packet
 }
 
+/// Start an edge session with heartbeat zero in the same write as the request.
+pub fn edge_start(side: Edge, height: u16) -> [u8; 20] {
+    let mut packet = [0; 20];
+    packet[..11].copy_from_slice(&edge_packet(side, height));
+    packet[11..].copy_from_slice(&encode(Frame::Heartbeat(0)));
+    packet
+}
+
 pub fn edge_entry([side, hi, lo]: [u8; 3]) -> Option<(Edge, u16)> {
     let entry = match side {
         0 => Edge::Right,
@@ -102,6 +110,10 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Frame> {
 }
 
 pub async fn write(writer: &mut (impl AsyncWrite + Unpin), frame: Frame) -> io::Result<()> {
+    writer.write_all(&encode(frame)).await
+}
+
+fn encode(frame: Frame) -> [u8; 9] {
     let mut bytes = [0; 9];
     match frame {
         Frame::Heartbeat(token) => bytes[1] = token,
@@ -136,7 +148,7 @@ pub async fn write(writer: &mut (impl AsyncWrite + Unpin), frame: Frame) -> io::
             bytes[5..9].copy_from_slice(&dy.to_be_bytes());
         }
     }
-    writer.write_all(&bytes).await
+    bytes
 }
 
 fn state(value: u8) -> io::Result<ButtonState> {
@@ -204,4 +216,13 @@ fn edge_request_requires_an_opposite_horizontal_side_and_preserves_height() {
     assert_eq!(edge_entry([1, 0, 0]), Some((Edge::Left, 0)));
     assert_eq!(edge_entry([2, 0, 0]), None);
     assert_eq!(edge_return(0x1234), [EDGE_RETURN, 0x12, 0x34]);
+}
+#[cfg(test)]
+#[tokio::test]
+async fn edge_start_appends_a_heartbeat_to_the_existing_request() {
+    let packet = edge_start(Edge::Right, 0x7654);
+    let (request, mut frames) = packet.split_at(11);
+    assert_eq!(request, edge_packet(Edge::Right, 0x7654));
+    assert_eq!(read(&mut frames).await.unwrap(), Frame::Heartbeat(0));
+    assert!(frames.is_empty());
 }

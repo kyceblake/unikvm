@@ -80,6 +80,10 @@ impl EdgeTrigger {
         self.last = Some(now);
         Some(height)
     }
+
+    pub(super) fn rearm(&mut self) {
+        self.last = None;
+    }
 }
 
 #[cfg(test)]

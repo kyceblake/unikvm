@@ -159,24 +159,13 @@ async fn inject(
     entry: Option<(EdgeLayout, u16)>,
 ) -> Result<Option<u16>> {
     let mut deadline = Instant::now() + LEASE;
-    // Wait for the first heartbeat before repositioning the cursor. The
-    // sender may cancel a request after the receiver grants it.
+    // Reposition only after granting focus and reading the first heartbeat.
     let mut pending_entry = entry;
     let edge = entry.map(|(edge, _)| edge);
-    let mut motion = match MotionPacer::new(sink) {
-        Ok(motion) => {
-            if let Some(period) = motion.display_period() {
-                tracing::debug!(
-                    refresh_hz = period.as_secs_f64().recip(),
-                    "pointer pacing initialized"
-                );
-            }
-            Some(motion)
-        }
-        Err(error) => {
-            warn!(%error, "frame timer unavailable; injecting motion as it arrives");
-            None
-        }
+    let mut motion = if entry.is_none() {
+        pointer_pacer(sink)
+    } else {
+        None
     };
     loop {
         let read = timeout_at(deadline, input::read(recv));
@@ -239,20 +228,39 @@ async fn inject(
                     InputSink::has_permission(),
                     "local input posting became unavailable"
                 );
-                if let Some((edge, height)) = pending_entry.take() {
+                let arriving = pending_entry.take();
+                if let Some((edge, height)) = arriving {
                     sink.enter_edge(edge, height)?;
-                    if let Ok(next) = MotionPacer::new(sink) {
-                        motion = Some(next);
-                    }
                 }
                 timeout_at(deadline, send.write_all(&[HEARTBEAT_ACK + token]))
                     .await
                     .context("input acknowledgment timed out")??;
                 deadline = Instant::now() + LEASE;
+                if arriving.is_some() {
+                    motion = pointer_pacer(sink);
+                }
             }
         }
         // Let the local-activity branch run even when the peer has buffered many frames.
         tokio::task::yield_now().await;
+    }
+}
+
+fn pointer_pacer(sink: &InputSink) -> Option<MotionPacer> {
+    match MotionPacer::new(sink) {
+        Ok(motion) => {
+            if let Some(period) = motion.display_period() {
+                tracing::debug!(
+                    refresh_hz = period.as_secs_f64().recip(),
+                    "pointer pacing initialized"
+                );
+            }
+            Some(motion)
+        }
+        Err(error) => {
+            warn!(%error, "frame timer unavailable; injecting motion as it arrives");
+            None
+        }
     }
 }
 

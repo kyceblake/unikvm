@@ -11,9 +11,12 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use core_foundation::base::TCFType;
+use core_foundation::base::{TCFType, kCFAllocatorDefault};
 use core_foundation::mach_port::{CFMachPort, CFMachPortInvalidate, CFMachPortRef};
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+use core_foundation::runloop::{
+    CFRunLoop, CFRunLoopGetCurrent, CFRunLoopSource, CFRunLoopSourceContext, CFRunLoopSourceCreate,
+    CFRunLoopSourceSignal, CFRunLoopStop, CFRunLoopWakeUp, kCFRunLoopDefaultMode,
+};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
@@ -29,7 +32,8 @@ use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 use super::EdgeLayout;
 use super::capture::{
-    ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state, request_start,
+    ARM_DELAY, Command, MonitorWake, POLL, PhysicalMotion, Shortcut, activity, button_state,
+    request_start,
 };
 use super::edge::EdgeTrigger;
 use super::macos::{EVENT_TAG, MacInputSink, key_code};
@@ -102,18 +106,69 @@ struct TapState {
     scroll_remainder: [f64; 2],
 }
 
+struct RunLoopWake {
+    run_loop: CFRunLoop,
+    source: CFRunLoopSource,
+}
+
+// SAFETY: The source is immutable from Rust and only the thread-safe signal
+// operation is exposed across threads. Retained CF objects keep both handles live.
+unsafe impl Send for RunLoopWake {}
+unsafe impl Sync for RunLoopWake {}
+
+impl RunLoopWake {
+    fn new(run_loop: CFRunLoop) -> io::Result<Self> {
+        extern "C" fn perform(_: *const c_void) {
+            // SAFETY: This callback runs within the monitor's active run loop.
+            unsafe { CFRunLoopStop(CFRunLoopGetCurrent()) };
+        }
+
+        let mut context = CFRunLoopSourceContext {
+            version: 0,
+            info: null_mut(),
+            retain: None,
+            release: None,
+            copyDescription: None,
+            equal: None,
+            hash: None,
+            schedule: None,
+            cancel: None,
+            perform,
+        };
+        // SAFETY: The context contains a static callback and no borrowed state.
+        let raw = unsafe { CFRunLoopSourceCreate(kCFAllocatorDefault, 0, &mut context) };
+        if raw.is_null() {
+            return Err(io::Error::other("create input command run loop source"));
+        }
+        // SAFETY: The create call transferred an owning CF reference.
+        let source = unsafe { CFRunLoopSource::wrap_under_create_rule(raw) };
+        Ok(Self { run_loop, source })
+    }
+
+    fn notify(&self) {
+        // SAFETY: Both handles are retained. Signaling before wake also covers
+        // commands that arrive just before the monitor enters its wait.
+        unsafe {
+            CFRunLoopSourceSignal(self.source.as_concrete_TypeRef());
+            CFRunLoopWakeUp(self.run_loop.as_concrete_TypeRef());
+        }
+    }
+}
+
 pub(super) fn run_tap(
     commands: watch::Receiver<Command>,
     shortcuts: watch::Sender<Shortcut>,
     events: mpsc::Sender<InputEvent>,
     stop: Arc<AtomicBool>,
-    initialized: &std::sync::mpsc::SyncSender<io::Result<()>>,
+    initialized: &std::sync::mpsc::SyncSender<io::Result<MonitorWake>>,
     allow_send: bool,
     edge: Option<EdgeLayout>,
 ) -> io::Result<()> {
     if !MacInputSink::has_permission() {
         return Err(tap_permission());
     }
+    let run_loop = CFRunLoop::get_current();
+    let wake = Arc::new(RunLoopWake::new(run_loop.clone())?);
     let state = RefCell::new(TapState {
         commands,
         shortcuts,
@@ -156,13 +211,16 @@ pub(super) fn run_tap(
         .map_err(|()| io::Error::other("create Quartz event tap run loop source"))?;
     // SAFETY: Core Foundation's default mode is a valid static run loop mode.
     let mode = unsafe { kCFRunLoopDefaultMode };
-    let run_loop = CFRunLoop::get_current();
     run_loop.add_source(&source, mode);
+    run_loop.add_source(&wake.source, mode);
     // SAFETY: The port is alive for the full dispatch loop.
     unsafe { CGEventTapEnable(raw, true) };
 
     let result: io::Result<()> = (|| {
-        initialized.send(Ok(())).map_err(io::Error::other)?;
+        let signal = wake.clone();
+        initialized
+            .send(Ok(Box::new(move || signal.notify())))
+            .map_err(|_| io::Error::other("input monitor startup was cancelled"))?;
         let mut secured = false;
         let mut last_permission_check = Instant::now();
         while !stop.load(Relaxed) {
@@ -192,6 +250,7 @@ pub(super) fn run_tap(
     })();
     state.borrow_mut().local();
     run_loop.remove_source(&source, mode);
+    run_loop.remove_source(&wake.source, mode);
     // SAFETY: Stop deliveries before dropping the port and callback state.
     unsafe { CFMachPortInvalidate(raw) };
     result
@@ -296,11 +355,12 @@ impl TapState {
     }
 
     fn return_locally(&mut self, height: Option<u16>) {
-        if let (Some(cursor), Some(height), Some(edge)) = (&mut self.cursor, height, &self.edge)
+        if let (Some(cursor), Some(height), Some(edge)) = (&mut self.cursor, height, &mut self.edge)
             && let Ok(point) = edge.layout.entry(height)
         {
             // The cursor guard restores its anchor before revealing it.
             cursor.anchor = CGPoint::new(f64::from(point.x), f64::from(point.y));
+            edge.rearm();
         }
         self.local();
     }
@@ -316,8 +376,13 @@ impl TapState {
     fn capture(&mut self, event: &CGEvent) -> bool {
         use CGEventType::*;
         let command = *self.commands.borrow();
-        if let Command::Local { return_height } = command {
-            self.return_locally(return_height);
+        // The run loop applies mapped returns between events so an old
+        // mouse location cannot override the restored anchor.
+        if let Command::Local {
+            return_height: None,
+        } = command
+        {
+            self.local();
         }
         let kind = event.get_type();
         match kind {
