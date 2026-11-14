@@ -3,9 +3,9 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage};
-use unikvm_platform::input::{Capture, MacInputSink, request_monitor_permission};
+use unikvm_platform::input::{Capture, MacInputSink, MotionPacer, request_monitor_permission};
 
-const USAGE: &str = "usage: input_probe [--request-permission | --exercise | --request-capture-permission | --capture]";
+const USAGE: &str = "usage: input_probe [--request-permission | --exercise | --request-capture-permission | --capture | --refresh]";
 
 pub(super) fn run() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -33,6 +33,18 @@ pub(super) fn run() -> io::Result<()> {
             Ok(())
         }
         Some("--capture") => capture(),
+        Some("--refresh") => {
+            let sink = MacInputSink::new()?;
+            let pacer = MotionPacer::new(&sink)?;
+            let period = pacer.display_period().ok_or_else(|| {
+                io::Error::other("macOS did not report a usable display refresh rate")
+            })?;
+            println!(
+                "Display under pointer reports {:.2} Hz.",
+                period.as_secs_f64().recip()
+            );
+            Ok(())
+        }
         _ => Err(io::Error::other(USAGE)),
     }
 }
@@ -41,7 +53,7 @@ fn capture() -> io::Result<()> {
     let mut capture = Capture::start(true)?;
     let before = *capture.shortcuts.borrow();
     println!(
-        "Focus a blank editor, press Ctrl+Shift+F9, release the chord, then type, move, click and scroll. Press Ctrl+Shift+F10 to end. You have 20 seconds."
+        "Focus a blank editor, press Ctrl+Shift+F9, release the chord, then type, move, click and scroll. Check that the local pointer stays in place. Press Ctrl+Shift+F10 to end and check that it moves again. You have 20 seconds."
     );
     let end = Instant::now() + Duration::from_secs(20);
     let (mut keys, mut moves, mut buttons, mut wheels) = (0, 0, 0, 0);

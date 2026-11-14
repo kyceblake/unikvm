@@ -7,8 +7,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
     KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+    MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
 };
 
 use super::windows::{check_input_desktop, key_usage, physical_input_held};
@@ -28,6 +28,10 @@ pub struct WindowsInputSink {
 }
 
 impl WindowsInputSink {
+    pub(super) fn pointer_display(&self) -> super::windows_motion::PointerDisplay {
+        super::windows_motion::PointerDisplay::default()
+    }
+
     pub fn has_permission() -> bool {
         check_input_desktop().is_ok()
     }
@@ -49,7 +53,12 @@ impl WindowsInputSink {
         match event {
             InputEvent::Key { usage, state } => self.key(usage, state),
             InputEvent::PointerButton { button, state } => self.button(button, state),
-            InputEvent::PointerMove { dx, dy } => inject(mouse_input(MOUSEEVENTF_MOVE, 0, dx, dy)),
+            InputEvent::PointerMove { dx, dy } => inject(mouse_input(
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_MOVE_NOCOALESCE,
+                0,
+                dx,
+                dy,
+            )),
             InputEvent::Wheel {
                 horizontal,
                 vertical,

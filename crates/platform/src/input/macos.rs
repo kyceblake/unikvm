@@ -35,6 +35,7 @@ pub struct MacInputSink {
     buttons: [bool; 5],
     caps_lock: bool,
     pointer: CGPoint,
+    display: CGDisplay,
     bounds: CGRect,
     wheel_remainder: [i64; 2],
     last_click: [Option<(Instant, CGPoint, i64)>; 5],
@@ -83,14 +84,16 @@ impl MacInputSink {
         let displays = CGDisplay::active_displays().map_err(|status| {
             io::Error::other(format!("could not list active displays ({status})"))
         })?;
-        let bounds = displays
+        let display = displays
             .into_iter()
-            .map(|display| CGDisplay::new(display).bounds())
-            .find(|bounds| {
+            .map(CGDisplay::new)
+            .find(|display| {
+                let bounds = display.bounds();
                 (bounds.origin.x..bounds.origin.x + bounds.size.width).contains(&pointer.x)
                     && (bounds.origin.y..bounds.origin.y + bounds.size.height).contains(&pointer.y)
             })
-            .unwrap_or_else(|| CGDisplay::main().bounds());
+            .unwrap_or_else(CGDisplay::main);
+        let bounds = display.bounds();
         if bounds.size.width < 1.0 || bounds.size.height < 1.0 {
             return Err(io::Error::other("could not read pointer display bounds"));
         }
@@ -101,10 +104,15 @@ impl MacInputSink {
             buttons: [false; 5],
             caps_lock: false,
             pointer: clamp(pointer, bounds),
+            display,
             bounds,
             wheel_remainder: [0; 2],
             last_click: [None; 5],
         })
+    }
+
+    pub(super) fn pointer_display(&self) -> super::macos_motion::PointerDisplay {
+        super::macos_motion::PointerDisplay::new(self.display.id)
     }
 
     pub fn send(&mut self, event: InputEvent) -> io::Result<()> {
@@ -259,7 +267,7 @@ impl MacInputSink {
             (target.y - previous.y).round() as i64,
         );
         self.pointer = target;
-        self.post(&event, CGEventFlags::empty());
+        self.post(&event, CGEventFlags::CGEventFlagNonCoalesced);
         Ok(())
     }
 

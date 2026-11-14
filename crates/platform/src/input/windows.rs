@@ -53,7 +53,6 @@ struct HookState {
     stopped_generation: Option<u64>,
     generation: Option<u64>,
     arm_until: Instant,
-    mouse: Option<(i32, i32)>,
     last_pointer: POINT,
     motion: PhysicalMotion,
 }
@@ -92,7 +91,6 @@ pub(super) fn run_hooks(
             stopped_generation: None,
             generation: None,
             arm_until: Instant::now(),
-            mouse: None,
             last_pointer,
             motion: PhysicalMotion::default(),
         });
@@ -145,13 +143,9 @@ pub(super) fn run_hooks(
                         }
                     }
                 }
-                Command::Local => {
-                    state.remote = false;
-                    state.mouse = None;
-                }
+                Command::Local => state.remote = false,
                 Command::Remote { .. } => {}
             }
-            state.flush_motion();
         });
         let mut message = MSG::default();
         // Bound each batch so the watchdog also runs under continuous input.
@@ -182,7 +176,6 @@ pub(super) fn run_hooks(
 impl HookState {
     fn emergency(&mut self) {
         self.remote = false;
-        self.mouse = None;
         self.stopped_generation = self.generation;
         self.shortcuts.send_modify(|signal| {
             signal.stop = signal.stop.wrapping_add(1);
@@ -197,13 +190,6 @@ impl HookState {
         } else {
             true
         }
-    }
-
-    fn flush_motion(&mut self) -> bool {
-        let Some((dx, dy)) = self.mouse.take() else {
-            return true;
-        };
-        self.enqueue(InputEvent::PointerMove { dx, dy })
     }
 
     fn key(&mut self, event: &KBDLLHOOKSTRUCT, pressed: bool) -> bool {
@@ -239,17 +225,14 @@ impl HookState {
             return self.remote;
         };
         let index = usize::from(usage);
-        if self.remote {
-            self.flush_motion();
-            if self.remote
-                && self.enqueue(InputEvent::Key {
-                    usage: KeyUsage(usage),
-                    state: button_state(pressed),
-                })
-            {
-                self.swallowed_keys[index] = pressed;
-                return true;
-            }
+        if self.remote
+            && self.enqueue(InputEvent::Key {
+                usage: KeyUsage(usage),
+                state: button_state(pressed),
+            })
+        {
+            self.swallowed_keys[index] = pressed;
+            return true;
         }
         if !pressed && self.swallowed_keys[index] {
             self.swallowed_keys[index] = false;
@@ -279,14 +262,17 @@ impl HookState {
             activity(&self.shortcuts);
         }
         if message == WM_MOUSEMOVE && self.remote {
-            let x = event.pt.x.saturating_sub(self.anchor.x);
-            let y = event.pt.y.saturating_sub(self.anchor.y);
-            let (dx, dy) = self.mouse.unwrap_or_default();
-            self.mouse = Some((
-                dx.saturating_add(x).clamp(-32768, 32768),
-                dy.saturating_add(y).clamp(-32768, 32768),
-            ));
-            return true;
+            let dx = event
+                .pt
+                .x
+                .saturating_sub(self.anchor.x)
+                .clamp(-32768, 32768);
+            let dy = event
+                .pt
+                .y
+                .saturating_sub(self.anchor.y)
+                .clamp(-32768, 32768);
+            return (dx == 0 && dy == 0) || self.enqueue(InputEvent::PointerMove { dx, dy });
         }
         let mouse_data = (event.mouseData >> 16) as u16;
         let mapped = match message {
@@ -309,7 +295,6 @@ impl HookState {
         };
         if let Some((button, index, pressed)) = mapped {
             if self.remote
-                && self.flush_motion()
                 && self.enqueue(InputEvent::PointerButton {
                     button,
                     state: button_state(pressed),
@@ -327,11 +312,10 @@ impl HookState {
             }
         } else if self.remote && matches!(message, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
             let delta = i32::from(mouse_data as i16);
-            return self.flush_motion()
-                && self.enqueue(InputEvent::Wheel {
-                    horizontal: if message == WM_MOUSEHWHEEL { delta } else { 0 },
-                    vertical: if message == WM_MOUSEWHEEL { delta } else { 0 },
-                });
+            return self.enqueue(InputEvent::Wheel {
+                horizontal: if message == WM_MOUSEHWHEEL { delta } else { 0 },
+                vertical: if message == WM_MOUSEWHEEL { delta } else { 0 },
+            });
         }
         self.remote
     }
@@ -339,7 +323,6 @@ impl HookState {
     fn check_capture_command(&mut self) {
         if matches!(*self.commands.borrow(), Command::Local) {
             self.remote = false;
-            self.mouse = None;
         }
     }
 }
@@ -539,7 +522,6 @@ mod tests {
             stopped_generation: None,
             generation: None,
             arm_until: std::time::Instant::now(),
-            mouse: None,
             last_pointer: Default::default(),
             motion: Default::default(),
         };

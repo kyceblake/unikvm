@@ -59,6 +59,14 @@ cargo run --locked -p unikvm-platform --example input_probe -- --capture
 cargo run --locked -p unikvm-platform --example input_probe -- --request-capture-permission
 ```
 
-macOS may list the probe, terminal, and agent separately in privacy settings. Verify that local input resumes after Ctrl+Shift+F10, that the editor received no typed text during capture, and that the probe counted keys, movement, clicks, and scrolling.
+macOS may list the probe, terminal, and agent separately in privacy settings. Verify that the pointer stays in place during capture, local input resumes after Ctrl+Shift+F10, the editor received no typed text during capture, and the probe counted keys, movement, clicks, and scrolling. Quartz permits cursor disassociation in the foreground. The background fallback returns the pointer to its capture position after movement using a Quartz warp. Verify both behaviors on the target Mac. [Apple cursor control guide](https://developer.apple.com/library/archive/documentation/GraphicsImaging/Conceptual/QuartzDisplayServicesConceptual/Articles/MouseCursor.html)
+
+For remote reception, the Mac uses the active Quartz display mode. If it omits a fixed rate, the agent tries the nominal period reported by Core Video. ProMotion and variable-refresh modes can change between scanouts. Motion pacing uses the reported nominal period and falls back to immediate injection if macOS reports no usable period. [Quartz display mode refresh rate](https://developer.apple.com/documentation/coregraphics/cgdisplaymode/refreshrate), [Core Video nominal refresh period](https://developer.apple.com/documentation/corevideo/cvdisplaylinkgetnominaloutputvideorefreshperiod(_:))
+
+Put the pointer on the display you want to test and run the refresh probe. It reports the rate used by the receiver.
+
+```sh
+cargo run --locked -p unikvm-platform --example input_probe -- --refresh
+```
 
 The probes run separately from the agents. On macOS, posting keyboard or pointer events requires the explicit exercise flag. [Apple posting permission](https://developer.apple.com/documentation/coregraphics/cgpreflightposteventaccess()), [Apple event posting](https://developer.apple.com/documentation/coregraphics/cgevent/post(tap:))

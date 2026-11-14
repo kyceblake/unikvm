@@ -5,8 +5,9 @@ use tokio::sync::watch;
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
+use unikvm_core::input::InputEvent;
 use unikvm_network::identity::Fingerprint;
-use unikvm_platform::input::{InputSink, Shortcut};
+use unikvm_platform::input::{InputSink, MotionPacer, Shortcut};
 use unikvm_protocol::input::{self, DENY, Frame, GRANT, HEARTBEAT_ACK, LEASE, REQUEST};
 
 use super::Focus;
@@ -126,13 +127,65 @@ async fn inject(
     recv: &mut quinn::RecvStream,
 ) -> Result<()> {
     let mut deadline = Instant::now() + LEASE;
+    let mut motion = match MotionPacer::new(sink) {
+        Ok(motion) => {
+            if let Some(period) = motion.display_period() {
+                tracing::debug!(
+                    refresh_hz = period.as_secs_f64().recip(),
+                    "pointer pacing initialized"
+                );
+            }
+            Some(motion)
+        }
+        Err(error) => {
+            warn!(%error, "frame timer unavailable; injecting motion as it arrives");
+            None
+        }
+    };
     loop {
-        match timeout_at(deadline, input::read(recv))
-            .await
-            .context("peer input lease expired")??
-        {
-            Frame::Release => return Ok(()),
-            Frame::Event(event) => sink.send(event)?,
+        let read = timeout_at(deadline, input::read(recv));
+        let frame = if let Some(pacer) = &mut motion {
+            tokio::pin!(read);
+            loop {
+                // Keep the same read alive on frame ticks. Dropping a partial
+                // read would lose bytes from the ordered input stream.
+                tokio::select! {
+                    biased;
+                    step = pacer.next() => {
+                        let [dx, dy] = step.context("pace pointer movement")?;
+                        if dx != 0 || dy != 0 {
+                            sink.send(InputEvent::PointerMove { dx, dy })?;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                    result = &mut read => break result,
+                }
+            }
+        } else {
+            read.await
+        };
+
+        match frame.context("peer input lease expired")?? {
+            Frame::Release => {
+                if let Some(pacer) = &mut motion {
+                    flush_motion(pacer, sink)?;
+                }
+                return Ok(());
+            }
+            Frame::Event(event) => {
+                if let Some(pacer) = &mut motion {
+                    if let InputEvent::PointerMove { dx, dy } = event
+                        && pacer.queue(dx, dy)
+                    {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                    // Preserve pointer position before discrete input, including
+                    // clicks, and drain it before falling back to immediate motion.
+                    flush_motion(pacer, sink)?;
+                }
+                sink.send(event)?;
+            }
             Frame::Heartbeat(token) => {
                 ensure!(
                     InputSink::has_permission(),
@@ -147,6 +200,14 @@ async fn inject(
         // Let the local-activity branch run even when the peer has buffered many frames.
         tokio::task::yield_now().await;
     }
+}
+
+fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Result<()> {
+    let [dx, dy] = pacer.take_pending();
+    if dx != 0 || dy != 0 {
+        sink.send(InputEvent::PointerMove { dx, dy })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

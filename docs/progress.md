@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-14 — Display-paced pointer motion
+
+- The paired desktops passed Windows-to-Mac input. Mac-to-Windows input worked with a moving local Mac pointer and visibly slower motion on the 240 Hz Windows monitor.
+- Each sender forwards pointer movement directly from its native callback. macOS disassociates or parks its cursor while sending. Both receivers pace motion to the reported rate of their display and apply pending movement before a click. The input wire format is unchanged.
+- The Windows desktop probe detected 240 Hz and moved the pointer in paced steps. The 60-to-240 and 240-to-60 Hz tests verify interpolation, coalescing, and preservation of relative motion. The next step on macOS is to run the [refresh probe](platform-support.md#run-the-macos-input-probes) and check cursor parking and motion in both directions on the paired desktops.
+
 ## 2026-11-14 — Bidirectional Windows and macOS input
 
 - Added `[input] mode = "bidirectional"` for a selected pinned peer. Each machine reserves local focus for one input session. Physical keyboard, mouse, or trackpad activity on the receiver ends sharing and restores local control. The shortcut starts the next session in either direction.

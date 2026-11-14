@@ -14,11 +14,13 @@ use std::time::{Duration, Instant};
 use core_foundation::base::TCFType;
 use core_foundation::mach_port::{CFMachPort, CFMachPortInvalidate, CFMachPortRef};
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopDefaultMode};
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
     EventField, KeyCode,
 };
-use core_graphics::event_source::CGEventSourceStateID;
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use core_graphics::geometry::CGPoint;
 use core_graphics::sys::CGEventRef;
 use foreign_types::ForeignType;
 use tokio::sync::{mpsc, watch};
@@ -81,7 +83,7 @@ struct TapState {
     shortcuts: watch::Sender<Shortcut>,
     events: mpsc::Sender<InputEvent>,
     allow_send: bool,
-    remote: bool,
+    cursor: Option<CapturedCursor>,
     chords: [bool; 2],
     swallowed_keys: [bool; 256],
     swallowed_buttons: [bool; 5],
@@ -89,7 +91,7 @@ struct TapState {
     stopped_generation: Option<u64>,
     arm_until: Instant,
     motion: PhysicalMotion,
-    mouse: (i32, i32),
+    motion_remainder: [f64; 2],
     scroll_remainder: [f64; 2],
 }
 
@@ -109,7 +111,7 @@ pub(super) fn run_tap(
         shortcuts,
         events,
         allow_send,
-        remote: false,
+        cursor: None,
         chords: [false; 2],
         swallowed_keys: [false; 256],
         swallowed_buttons: [false; 5],
@@ -117,7 +119,7 @@ pub(super) fn run_tap(
         stopped_generation: None,
         arm_until: Instant::now(),
         motion: PhysicalMotion::default(),
-        mouse: (0, 0),
+        motion_remainder: [0.0; 2],
         scroll_remainder: [0.0; 2],
     });
     let mask = EVENT_TYPES
@@ -179,6 +181,7 @@ pub(super) fn run_tap(
         }
         Ok(())
     })();
+    state.borrow_mut().local();
     run_loop.remove_source(&source, mode);
     // SAFETY: Stop deliveries before dropping the port and callback state.
     unsafe { CFMachPortInvalidate(raw) };
@@ -229,11 +232,7 @@ unsafe extern "C" fn tap_callback(
 impl TapState {
     fn update(&mut self, command: Command) {
         match command {
-            Command::Local => {
-                self.remote = false;
-                self.mouse = (0, 0);
-                self.scroll_remainder = [0.0; 2];
-            }
+            Command::Local => self.local(),
             Command::Remote {
                 generation,
                 expires,
@@ -243,12 +242,14 @@ impl TapState {
                     self.generation = Some(generation);
                     self.arm_until = now + ARM_DELAY;
                 }
-                if now >= expires || (!self.remote && now >= self.arm_until) {
+                if now >= expires || (self.cursor.is_none() && now >= self.arm_until) {
                     self.emergency();
-                } else if !self.remote && !physical_input_held() {
-                    self.remote = true;
+                } else if self.cursor.is_none() && !physical_input_held() {
+                    match CapturedCursor::new() {
+                        Ok(cursor) => self.cursor = Some(cursor),
+                        Err(()) => self.emergency(),
+                    }
                 }
-                self.flush_motion();
             }
             Command::Remote { .. } => {}
         }
@@ -260,14 +261,20 @@ impl TapState {
     }
 
     fn emergency(&mut self) {
-        self.remote = false;
-        self.mouse = (0, 0);
-        self.scroll_remainder = [0.0; 2];
+        self.local();
         self.stopped_generation = self.generation;
         self.shortcuts.send_modify(|signal| {
             signal.stop = signal.stop.wrapping_add(1);
             signal.cancelled = true;
         });
+    }
+
+    fn local(&mut self) {
+        if self.cursor.take().is_some() {
+            self.motion = PhysicalMotion::default();
+            self.motion_remainder = [0.0; 2];
+        }
+        self.scroll_remainder = [0.0; 2];
     }
 
     fn enqueue(&mut self, event: InputEvent) -> bool {
@@ -278,15 +285,10 @@ impl TapState {
         true
     }
 
-    fn flush_motion(&mut self) -> bool {
-        let (dx, dy) = std::mem::take(&mut self.mouse);
-        (dx == 0 && dy == 0) || self.enqueue(InputEvent::PointerMove { dx, dy })
-    }
-
     fn capture(&mut self, event: &CGEvent) -> bool {
         use CGEventType::*;
         if matches!(*self.commands.borrow(), Command::Local) {
-            self.remote = false;
+            self.local();
         }
         let kind = event.get_type();
         match kind {
@@ -296,15 +298,30 @@ impl TapState {
                 self.key(code, kind, event.get_flags())
             }
             MouseMoved | LeftMouseDragged | RightMouseDragged | OtherMouseDragged => {
-                let dx = delta(event, EventField::MOUSE_EVENT_DELTA_X);
-                let dy = delta(event, EventField::MOUSE_EVENT_DELTA_Y);
-                if self.remote {
-                    self.mouse.0 = (self.mouse.0 + dx).clamp(-32768, 32768);
-                    self.mouse.1 = (self.mouse.1 + dy).clamp(-32768, 32768);
-                } else if self.motion.update(dx, dy, Instant::now()) {
+                let delta = [
+                    EventField::MOUSE_EVENT_DELTA_X,
+                    EventField::MOUSE_EVENT_DELTA_Y,
+                ]
+                .map(|field| event.get_double_value_field(field).clamp(-32768.0, 32768.0));
+                if let Some(cursor) = &self.cursor {
+                    if !cursor.park() {
+                        self.emergency();
+                        return false;
+                    }
+                    let [dx, dy] = std::array::from_fn(|axis| {
+                        let total = delta[axis] + self.motion_remainder[axis];
+                        let step = total as i32;
+                        self.motion_remainder[axis] = total - f64::from(step);
+                        step
+                    });
+                    return (dx == 0 && dy == 0)
+                        || self.enqueue(InputEvent::PointerMove { dx, dy });
+                }
+                let [dx, dy] = delta.map(|axis| axis.round() as i32);
+                if self.motion.update(dx, dy, Instant::now()) {
                     activity(&self.shortcuts);
                 }
-                self.remote
+                false
             }
             LeftMouseDown | LeftMouseUp | RightMouseDown | RightMouseUp | OtherMouseDown
             | OtherMouseUp => {
@@ -317,7 +334,7 @@ impl TapState {
                 if event.get_integer_value_field(MOMENTUM_PHASE) == 0 {
                     activity(&self.shortcuts);
                 }
-                self.remote && self.flush_motion() && self.scroll(event)
+                self.cursor.is_some() && self.scroll(event)
             }
             _ => false,
         }
@@ -337,7 +354,7 @@ impl TapState {
                 self.chords[index] = true;
                 if code == KeyCode::F10 {
                     self.emergency();
-                } else if !self.remote {
+                } else if self.cursor.is_none() {
                     self.shortcuts.send_modify(|signal| {
                         signal.start = signal.start.wrapping_add(1);
                         signal.cancelled = false;
@@ -348,12 +365,11 @@ impl TapState {
         }
 
         let Some(usage) = key_usage(code) else {
-            return self.remote;
+            return self.cursor.is_some();
         };
         // Caps Lock changes toggle state clients see, rather than reporting an ordinary up/down pair.
         if matches!(kind, FlagsChanged) && usage == KeyUsage(0x39) {
-            return self.remote
-                && self.flush_motion()
+            return self.cursor.is_some()
                 && self.enqueue(InputEvent::Key {
                     usage,
                     state: ButtonState::Pressed,
@@ -365,15 +381,14 @@ impl TapState {
         }
         let pressed = if matches!(kind, FlagsChanged) {
             let Some(mask) = MODIFIER_MASKS.get(usize::from(usage.0).wrapping_sub(0xe0)) else {
-                return self.remote;
+                return self.cursor.is_some();
             };
             flags.bits() & mask != 0
         } else {
             matches!(kind, KeyDown)
         };
         let index = usize::from(usage.0);
-        if self.remote
-            && self.flush_motion()
+        if self.cursor.is_some()
             && self.enqueue(InputEvent::Key {
                 usage,
                 state: button_state(pressed),
@@ -396,12 +411,11 @@ impl TapState {
                 2 => (2, PointerButton::Middle),
                 3 => (3, PointerButton::Back),
                 4 => (4, PointerButton::Forward),
-                _ => return self.remote,
+                _ => return self.cursor.is_some(),
             },
         };
         let pressed = matches!(kind, LeftMouseDown | RightMouseDown | OtherMouseDown);
-        if self.remote
-            && self.flush_motion()
+        if self.cursor.is_some()
             && self.enqueue(InputEvent::PointerButton {
                 button,
                 state: button_state(pressed),
@@ -435,12 +449,42 @@ impl TapState {
     }
 }
 
+enum CapturedCursor {
+    Disassociated,
+    Anchored(CGPoint),
+}
+
+impl CapturedCursor {
+    fn new() -> Result<Self, ()> {
+        if CGDisplay::associate_mouse_and_mouse_cursor_position(false).is_ok() {
+            return Ok(Self::Disassociated);
+        }
+        // Quartz can require a foreground app for disassociation. A session tap can
+        // still use relative deltas and park the cursor at its original position.
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)?;
+        let point = CGEvent::new(source)?.location();
+        CGDisplay::warp_mouse_cursor_position(point).map_err(|_| ())?;
+        Ok(Self::Anchored(point))
+    }
+
+    fn park(&self) -> bool {
+        match *self {
+            Self::Disassociated => true,
+            Self::Anchored(point) => CGDisplay::warp_mouse_cursor_position(point).is_ok(),
+        }
+    }
+}
+
+impl Drop for CapturedCursor {
+    fn drop(&mut self) {
+        if matches!(self, Self::Disassociated) {
+            let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+        }
+    }
+}
+
 // Left/right device flags from IOKit's IOLLEvent.h in HID usage order.
 const MODIFIER_MASKS: [u64; 8] = [0x1, 0x2, 0x20, 0x8, 0x2000, 0x4, 0x40, 0x10];
-
-fn delta(event: &CGEvent, field: u32) -> i32 {
-    event.get_integer_value_field(field).clamp(-32768, 32768) as i32
-}
 
 fn key_usage(code: u16) -> Option<KeyUsage> {
     (0x04..=0xe7)
