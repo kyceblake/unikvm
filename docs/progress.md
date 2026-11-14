@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-15 — macOS sender cursor drift recovery
+
+- Fixed visible movement of the Mac sender's cursor by hiding it during capture and returning it to its saved anchor before showing it on release. Capture retains the anchor even after disassociation succeeds and corrects drift on mouse callbacks and monitor polls. Hide/show and reassociation are scoped to capture cleanup.
+- Background hiding requires the private, process-local WindowServer property `SetsCursorInBackground`. Its entry points are resolved at runtime; missing support or ineffective hiding rejects capture. No system preferences or dependencies changed.
+- On this Apple Silicon Mac, the native regression verified hiding, repeated drift correction, and restored visibility; all 37 standard workspace tests, formatting, strict Clippy, and workspace build passed. The operator confirmed Mac-to-Windows forwarding with the cursor hidden, then restored after Ctrl+Shift+F10.
+- Further work: verify foreground changes and cleanup on other macOS versions. This private cursor capability remains a compatibility constraint.
+
 ## 2026-11-14 — Display-paced pointer motion
 
 - The paired desktops passed Windows-to-Mac input. Mac-to-Windows input worked with a moving local Mac pointer and visibly slower motion on the 240 Hz Windows monitor.

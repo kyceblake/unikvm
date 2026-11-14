@@ -28,6 +28,7 @@ use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 use super::capture::{ARM_DELAY, Command, POLL, PhysicalMotion, Shortcut, activity, button_state};
 use super::macos::{EVENT_TAG, MacInputSink, key_code};
+use super::macos_cursor::BackgroundCursor;
 
 const EVENT_TYPES: [CGEventType; 14] = {
     use CGEventType::*;
@@ -250,6 +251,11 @@ impl TapState {
                         Err(()) => self.emergency(),
                     }
                 }
+                // Recheck outside mouse callbacks too: disassociation can lose
+                // its effect when the foreground application changes.
+                if self.cursor.as_ref().is_some_and(|cursor| !cursor.park()) {
+                    self.emergency();
+                }
             }
             Command::Remote { .. } => {}
         }
@@ -449,35 +455,51 @@ impl TapState {
     }
 }
 
-enum CapturedCursor {
-    Disassociated,
-    Anchored(CGPoint),
+struct CapturedCursor {
+    source: CGEventSource,
+    anchor: CGPoint,
+    disassociated: bool,
+    _visibility: BackgroundCursor,
 }
 
 impl CapturedCursor {
     fn new() -> Result<Self, ()> {
-        if CGDisplay::associate_mouse_and_mouse_cursor_position(false).is_ok() {
-            return Ok(Self::Disassociated);
-        }
-        // Quartz can require a foreground app for disassociation. A session tap can
-        // still use relative deltas and park the cursor at its original position.
+        // Save the anchor before disassociation. An API success does not prove
+        // the cursor stays disconnected while this headless agent is sending.
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)?;
-        let point = CGEvent::new(source)?.location();
-        CGDisplay::warp_mouse_cursor_position(point).map_err(|_| ())?;
-        Ok(Self::Anchored(point))
+        let anchor = CGEvent::new(source.clone())?.location();
+        let visibility = BackgroundCursor::hide()?;
+        let disassociated = CGDisplay::associate_mouse_and_mouse_cursor_position(false).is_ok();
+        let cursor = Self {
+            source,
+            anchor,
+            disassociated,
+            _visibility: visibility,
+        };
+        if !disassociated {
+            CGDisplay::warp_mouse_cursor_position(anchor).map_err(|_| ())?;
+        }
+        Ok(cursor)
     }
 
     fn park(&self) -> bool {
-        match *self {
-            Self::Disassociated => true,
-            Self::Anchored(point) => CGDisplay::warp_mouse_cursor_position(point).is_ok(),
+        let Ok(event) = CGEvent::new(self.source.clone()) else {
+            return false;
+        };
+        let point = event.location();
+        // Quartz warps can round fractional coordinates to a display pixel.
+        if (point.x - self.anchor.x).abs() <= 1.0 && (point.y - self.anchor.y).abs() <= 1.0 {
+            return true;
         }
+        CGDisplay::warp_mouse_cursor_position(self.anchor).is_ok()
     }
 }
 
 impl Drop for CapturedCursor {
     fn drop(&mut self) {
-        if matches!(self, Self::Disassociated) {
+        // Recenter while still hidden; the visibility guard is dropped afterward.
+        let _ = CGDisplay::warp_mouse_cursor_position(self.anchor);
+        if self.disassociated {
             let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
         }
     }
@@ -504,4 +526,53 @@ pub(super) fn physical_input_held() -> bool {
         .filter(|&key| key != KeyCode::CAPS_LOCK)
         .any(|key| unsafe { CGEventSourceKeyState(source, key) })
         || (0..5).any(|button| unsafe { CGEventSourceButtonState(source, button) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct RestorePointer(CGPoint);
+
+    impl Drop for RestorePointer {
+        fn drop(&mut self) {
+            let _ = CGDisplay::associate_mouse_and_mouse_cursor_position(true);
+            let _ = CGDisplay::warp_mouse_cursor_position(self.0);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires Accessibility and moves the desktop pointer"]
+    fn cursor_parking_recovers_native_drift() {
+        assert!(MacInputSink::has_permission());
+        let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
+        let position = || CGEvent::new(source.clone()).unwrap().location();
+        let anchor = position();
+        let _restore = RestorePointer(anchor);
+        let (displays, count) = CGDisplay::displays_with_point(anchor, 1).unwrap();
+        assert!(count > 0);
+        let bounds = CGDisplay::new(displays[0]).bounds();
+        let dx = if anchor.x + 24.0 < bounds.origin.x + bounds.size.width {
+            24.0
+        } else {
+            -24.0
+        };
+        let drift = CGPoint::new(anchor.x + dx, anchor.y);
+        let visible_before = super::super::macos_cursor::is_visible();
+        let cursor = CapturedCursor::new().unwrap();
+        assert!(!super::super::macos_cursor::is_visible());
+        // Even a successful disassociation does not prevent other cursor warps.
+        // The lock must detect and correct real drift, regardless of API status.
+        for _ in 0..3 {
+            CGDisplay::warp_mouse_cursor_position(drift).unwrap();
+            let moved = position();
+            assert!((moved.x - anchor.x).abs() > 12.0);
+            assert!(cursor.park());
+            let parked = position();
+            assert!((parked.x - anchor.x).abs() <= 1.0);
+            assert!((parked.y - anchor.y).abs() <= 1.0);
+        }
+        drop(cursor);
+        assert_eq!(super::super::macos_cursor::is_visible(), visible_before);
+    }
 }

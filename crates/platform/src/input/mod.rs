@@ -10,6 +10,8 @@ mod macos;
 #[cfg(target_os = "macos")]
 mod macos_capture;
 #[cfg(target_os = "macos")]
+mod macos_cursor;
+#[cfg(target_os = "macos")]
 mod macos_motion;
 
 #[cfg(target_os = "windows")]
