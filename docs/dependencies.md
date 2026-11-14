@@ -46,6 +46,10 @@ Phase 4 uses Tokio byte I/O and native clipboard adapters. Windows reuses `windo
 | --- | --- | --- | --- | --- | --- |
 | [core-graphics](https://crates.io/crates/core-graphics) | 0.25.0 | 1.65 | MIT OR Apache-2.0 | 2025-05-27 | macOS-only Quartz event creation, tags, physical keycodes, and display bounds. Enable `highsierra` for scroll event creation. Use two native calls for posting permission. |
 
+## Adopted for the clipboard monitor
+
+[tiny_http 0.12.0](https://crates.io/crates/tiny_http/0.12.0) is licensed MIT OR Apache-2.0 and has no declared MSRV. The stable release is older, so use its existing no-default-feature synchronous HTTP API only in the CLI, for a loopback listener and fixed routes. Reuse ring's system random source for the private URL. The agent continues to expose progress through native local IPC. [tiny_http server API](https://tiny-http.github.io/tiny-http/tiny_http/struct.Server.html)
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |

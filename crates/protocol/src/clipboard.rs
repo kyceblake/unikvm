@@ -9,8 +9,9 @@ use unikvm_core::clipboard::{
 };
 use unikvm_core::device::DeviceId;
 
-const HEADER: &[u8; 8] = b"CLIP/3\r\n";
-pub const READY: &[u8; 8] = b"CLIP/3\n\n";
+const HEADER: &[u8; 8] = b"CLIP/4\r\n";
+const RECEIPT: &[u8; 8] = b"CLIP/4 A";
+pub const READY: &[u8; 8] = b"CLIP/4\n\n";
 
 /// Order concurrent writes by logical counter, then by device ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -23,6 +24,17 @@ pub struct Revision {
 pub struct Update {
     revision: Revision,
     content: Content,
+}
+
+pub enum Record {
+    Update(Update),
+    Receipt(Receipt),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Receipt {
+    pub counter: NonZeroU64,
+    pub applied: bool,
 }
 
 impl Update {
@@ -82,9 +94,33 @@ pub async fn write(writer: &mut (impl AsyncWrite + Unpin), update: &Update) -> i
     Ok(())
 }
 
-pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Update> {
+pub async fn write_receipt(
+    writer: &mut (impl AsyncWrite + Unpin),
+    receipt: Receipt,
+) -> io::Result<()> {
+    let mut bytes = [0; 17];
+    bytes[..8].copy_from_slice(RECEIPT);
+    bytes[8..16].copy_from_slice(&receipt.counter.get().to_be_bytes());
+    bytes[16] = u8::from(receipt.applied);
+    writer.write_all(&bytes).await
+}
+
+pub async fn read_record(
+    reader: &mut (impl AsyncRead + Unpin),
+    on_update: impl FnOnce(Revision),
+) -> io::Result<Record> {
     let mut header = [0; HEADER.len()];
     reader.read_exact(&mut header).await?;
+    if &header == RECEIPT {
+        let counter = NonZeroU64::new(reader.read_u64().await?)
+            .ok_or_else(|| invalid("clipboard receipt must identify a revision"))?;
+        let applied = match reader.read_u8().await? {
+            0 => false,
+            1 => true,
+            _ => return Err(invalid("invalid clipboard receipt")),
+        };
+        return Ok(Record::Receipt(Receipt { counter, applied }));
+    }
     if &header != HEADER {
         return Err(invalid("unsupported clipboard frame"));
     }
@@ -103,6 +139,11 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Update> {
         return Err(invalid("invalid clipboard representation lengths"));
     }
 
+    let revision = Revision {
+        counter,
+        origin: DeviceId(origin),
+    };
+    on_update(revision);
     let content = if png_len != 0 {
         Content::Png(read_bytes(reader, png_len).await?)
     } else {
@@ -114,13 +155,7 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Update> {
         };
         Content::Text { plain, html }
     };
-    Update::new(
-        Revision {
-            counter,
-            origin: DeviceId(origin),
-        },
-        content,
-    )
+    Update::new(revision, content).map(Record::Update)
 }
 
 async fn read_bytes(reader: &mut (impl AsyncRead + Unpin), len: usize) -> io::Result<Vec<u8>> {
@@ -148,6 +183,51 @@ mod tests {
             counter: NonZeroU64::new(7).unwrap(),
             origin: DeviceId([42; 16]),
         }
+    }
+
+    async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Update> {
+        match read_record(reader, |_| {}).await? {
+            Record::Update(update) => Ok(update),
+            Record::Receipt(_) => Err(invalid("unexpected clipboard receipt")),
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_round_trips_without_announcing_an_update() {
+        let receipt = Receipt {
+            counter: revision().counter,
+            applied: true,
+        };
+        let mut bytes = Vec::new();
+        write_receipt(&mut bytes, receipt).await.unwrap();
+        let record = read_record(&mut bytes.as_slice(), |_| {
+            panic!("receipt is not an update")
+        })
+        .await
+        .unwrap();
+        assert!(matches!(record, Record::Receipt(actual) if actual == receipt));
+    }
+
+    #[tokio::test]
+    async fn announces_progress_after_valid_metadata_before_reading_the_payload() {
+        let update = Update::new(
+            revision(),
+            Content::Text {
+                plain: "data".into(),
+                html: None,
+            },
+        )
+        .unwrap();
+        let mut frame = Vec::new();
+        write(&mut frame, &update).await.unwrap();
+        frame.truncate(frame.len() - 4);
+        let mut announced = None;
+        let error = read_record(&mut frame.as_slice(), |revision| announced = Some(revision))
+            .await
+            .err()
+            .expect("expected a truncated payload");
+        assert_eq!(announced, Some(update.revision()));
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     async fn round_trip(content: Content) -> Update {

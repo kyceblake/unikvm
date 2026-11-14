@@ -1,10 +1,12 @@
 # Security
 
-The current agent exposes one read-only health/status query over native local IPC. A valid response confirms that the process served the query. The response contains the process ID and uptime in whole seconds.
+The agent exposes read-only health and clipboard progress queries over native local IPC. The health response contains the process ID and uptime in whole seconds. The clipboard progress response contains connection and transfer states.
 
 - Windows names its pipe using the logon SID, sets an explicit DACL for that SID, and rejects remote clients. The CLI opens the pipe at identification-only impersonation level and checks that the pipe owner matches its user SID before sending a request. First-instance creation prevents concurrent agents on the same endpoint. Other accounts guessing and precreating a pipe name can cause denial of service. The owner check rejects a forged response from such an account. [Microsoft named pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)
 - Linux and macOS use a socket in a user-owned mode-0700 directory. Both endpoints compare effective user IDs using native peer credentials. A lock serializes binding, stale socket removal, and shutdown cleanup. The fallback under `/tmp` can be precreated by another local user, resulting in a startup failure. The ownership check fails closed. [Tokio peer credential implementation](https://docs.rs/tokio/latest/src/tokio/net/unix/ucred.rs.html)
 - The agent bounds each exchange by time and frame size. A stalled local client can delay other local requests for up to one exchange deadline per connection. Processes with the same user or logon rights and OS administrators are inside the local trust boundary.
+
+The optional browser monitor runs in the CLI on an ephemeral IPv4 loopback port. Its private URL uses a random 128-bit token and the server checks the loopback Host header. It serves a static page and read-only clipboard states without clipboard contents, peer identities, or shared configuration. Responses prohibit caching and referrer forwarding.
 
 ## Manual peer trust
 

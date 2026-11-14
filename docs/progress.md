@@ -1,10 +1,17 @@
 # Progress
 
+## 2026-11-14 — Clipboard progress monitor
+
+- Added `unikvm clipboard` for Windows and macOS. The local browser panel shows incoming and outgoing activity, skipped entries, and confirmation from the destination. Clipboard protocol v4 adds a receipt tied to each update. The receiver sends success after writing to the native clipboard.
+- Windows formatting, strict Clippy, build, and 61 workspace tests passed, including the native IPC exchange and bidirectional QUIC receipt exchange. Checked panel layout and state transitions in Edge. Linux cross-target Clippy and Cargo deny passed. Windows denied access when launching the Apple Silicon compiler for dependencies.
+- Next, update both agents and use the [clipboard monitor instructions](clipboard-sync.md#watch-clipboard-progress) to repeat the full-size Preview copy and verify confirmations in both directions.
+
 ## 2026-11-14 — Telegram Copy Media compatibility
 
 - Telegram for macOS puts an image item alongside a file reference. The Mac adapter now checks for explicit image data before excluding file-reference copies. It never opens the referenced file and still skips pasteboard privacy markers. [Telegram's Copy Media implementation](https://github.com/TelegramMessenger/telegram-macos/blob/246e3e957ae5cea1ecff6d7a6a6db3e47be69bb5/packages/ChatUI/Sources/ChatUI/ChatMessageMenuItems.swift#L312-L317)
-- Added private pasteboard regressions for a file reference with an image item and a standalone Finder-style file reference. Next, build on the Mac, copy an ordinary photo from Telegram, and confirm it pastes in Paint. Finder copy/paste of the original JPEG remains part of Phase 5.
+- Added private pasteboard regressions for a file reference with an image item and a standalone Finder-style file reference. On the paired desktops, a Telegram photo and a fresh Mac screenshot both pasted into Paint. Windows logged both as received and applied. Copying a 3 MB JPEG in Finder left the previous Windows clipboard image in place, as expected before Phase 5 file transfer.
 - Windows formatting, strict Clippy, workspace build, and all 58 standard tests passed. Windows denied access when starting the Apple Silicon cross-check of two dependencies, so the Mac regressions still need a native run.
+- An initial full-image copy from Preview did not reach Windows. A small rectangular selection pasted into Paint. A subsequent retry left a synced PNG on the Windows clipboard matching the original photo's 1056 × 1280 dimensions, at about 1.2 MB. That transfer fits the image limits.
 
 ## 2026-11-14 — Mac image copy compatibility
 

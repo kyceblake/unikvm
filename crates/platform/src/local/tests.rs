@@ -2,7 +2,10 @@ use std::io;
 use std::time::Duration;
 
 use tokio::time::timeout;
-use unikvm_protocol::local::{Status, query, respond};
+use unikvm_protocol::local::{
+    ClipboardPhase, ClipboardStatus, Status, query, query_clipboard, respond,
+    respond_with_clipboard,
+};
 
 use super::Endpoint;
 
@@ -61,6 +64,24 @@ async fn native_status_transport_retains_endpoint_and_recovers_after_abandoned_c
             assert_eq!(received?, expected);
             served?;
         }
+        let clipboard = ClipboardStatus {
+            connected: true,
+            outgoing: ClipboardPhase::Ready,
+            incoming: ClipboardPhase::Copying,
+        };
+        let (received, served) = tokio::join!(
+            async {
+                let mut client = endpoint.connect().await?;
+                query_clipboard(&mut client).await
+            },
+            async {
+                let stream = listener.accept().await?;
+                respond_with_clipboard(stream, || expected, || clipboard).await?;
+                listener.finish()
+            }
+        );
+        assert_eq!(received?, clipboard);
+        served?;
         Ok::<_, io::Error>(())
     })
     .await??;
