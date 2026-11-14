@@ -28,6 +28,21 @@ pub struct Config {
     #[serde(default)]
     pub log_level: LogLevel,
     pub network: Option<NetworkConfig>,
+    pub input: Option<InputConfig>,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfig {
+    pub mode: InputMode,
+    pub peer_fingerprint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputMode {
+    Send,
+    Receive,
 }
 
 /// Explicit local UDP bind and manually approved peers.
@@ -59,6 +74,7 @@ impl Default for Config {
             schema_version: SCHEMA_VERSION,
             log_level: LogLevel::default(),
             network: None,
+            input: None,
         }
     }
 }
@@ -85,6 +101,8 @@ pub enum ConfigError {
     LegacyPeer,
     #[error("discovery requires listen to use a specific non-loopback LAN address")]
     DiscoveryAddress,
+    #[error("input.peer_fingerprint must identify a peer already trusted in [network]")]
+    InputPeer,
 }
 
 impl Config {
@@ -151,6 +169,16 @@ impl Config {
                 return Err(ConfigError::PeerAddressRequired);
             }
         }
+        if let Some(input) = &config.input
+            && !config.network.as_ref().is_some_and(|network| {
+                network.peers.iter().any(|peer| {
+                    peer.fingerprint
+                        .eq_ignore_ascii_case(&input.peer_fingerprint)
+                })
+            })
+        {
+            return Err(ConfigError::InputPeer);
+        }
         Ok(config)
     }
 }
@@ -171,6 +199,28 @@ mod tests {
                 .log_level,
             LogLevel::Debug
         );
+    }
+
+    #[test]
+    fn input_requires_a_separately_approved_peer_and_is_disabled_by_default() {
+        assert!(Config::default().input.is_none());
+        let input = "[input]\nmode = 'receive'\npeer_fingerprint = 'ab'";
+        let base = "schema_version = 1\n";
+        assert!(matches!(
+            Config::parse(&format!("{base}{input}")),
+            Err(ConfigError::InputPeer)
+        ));
+        let network = "[network]\nlisten = '127.0.0.1:24800'\nidentity = 'identity.bin'\npeer = '127.0.0.1:24801'\npeer_certificate = 'peer.der'\npeer_fingerprint = 'AB'\n";
+        assert!(
+            Config::parse(&format!("{base}{network}{input}"))
+                .unwrap()
+                .input
+                .is_some()
+        );
+        assert!(matches!(
+            Config::parse(&format!("{base}{network}{}", input.replace("'ab'", "'cd'"))),
+            Err(ConfigError::InputPeer)
+        ));
     }
 
     #[test]

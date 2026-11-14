@@ -286,3 +286,64 @@ async fn rejects_a_second_connection_from_an_authenticated_peer() {
     assert!(a_run.events.try_recv().is_err());
     tokio::join!(a_run.stop(), b_run.stop());
 }
+
+#[tokio::test]
+async fn either_authenticated_endpoint_can_open_an_input_stream() {
+    use tokio::io::AsyncWriteExt;
+    use unikvm_core::input::{ButtonState, InputEvent, KeyUsage};
+    use unikvm_protocol::input::{self, Frame, GRANT, REQUEST};
+
+    let [a_addr, b_addr] = addresses();
+    let a = Identity::generate().unwrap();
+    let b = Identity::generate().unwrap();
+    let a_endpoint =
+        PeerEndpoint::bind(a_addr, false, &a, vec![(approve(&b), Some(b_addr))]).unwrap();
+    let b_endpoint =
+        PeerEndpoint::bind(b_addr, false, &b, vec![(approve(&a), Some(a_addr))]).unwrap();
+    let mut a_connection = a_endpoint.connection(b.fingerprint()).unwrap();
+    let mut b_connection = b_endpoint.connection(a.fingerprint()).unwrap();
+    let mut a_run = Running::start(a_endpoint);
+    let mut b_run = Running::start(b_endpoint);
+    tokio::join!(
+        a_run.next(PeerEvent::Connected(b.fingerprint())),
+        b_run.next(PeerEvent::Connected(a.fingerprint())),
+    );
+    let a_connection = a_connection.borrow_and_update().clone().unwrap();
+    let b_connection = b_connection.borrow_and_update().clone().unwrap();
+    let frame = Frame::Event(InputEvent::Key {
+        usage: KeyUsage(0xe1),
+        state: ButtonState::Released,
+    });
+
+    for (sender, receiver) in [
+        (&a_connection, &b_connection),
+        (&b_connection, &a_connection),
+    ] {
+        timeout(WAIT, async {
+            tokio::join!(
+                async {
+                    let (mut send, mut recv) = sender.open_bi().await.unwrap();
+                    send.write_all(REQUEST).await.unwrap();
+                    let mut grant = [0];
+                    recv.read_exact(&mut grant).await.unwrap();
+                    assert_eq!(grant, [GRANT]);
+                    input::write(&mut send, frame).await.unwrap();
+                    send.shutdown().await.unwrap();
+                },
+                async {
+                    let (mut send, mut recv) = receiver.accept_bi().await.unwrap();
+                    let mut request = [0; REQUEST.len()];
+                    recv.read_exact(&mut request).await.unwrap();
+                    assert_eq!(request, *REQUEST);
+                    send.write_all(&[GRANT]).await.unwrap();
+                    assert_eq!(input::read(&mut recv).await.unwrap(), frame);
+                    assert_eq!(recv.read(&mut [0u8; 1]).await.unwrap(), None);
+                },
+            );
+        })
+        .await
+        .unwrap();
+    }
+    drop((a_connection, b_connection));
+    tokio::join!(a_run.stop(), b_run.stop());
+}

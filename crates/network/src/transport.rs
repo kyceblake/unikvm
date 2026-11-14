@@ -37,6 +37,7 @@ struct Peer {
     manual: Option<SocketAddr>,
     client: quinn::ClientConfig,
     incoming_slot: Semaphore,
+    connection: watch::Sender<Option<Connection>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +134,7 @@ impl PeerEndpoint {
                     manual,
                     client,
                     incoming_slot: Semaphore::new(1),
+                    connection: watch::channel(None).0,
                 },
             );
         }
@@ -161,6 +163,13 @@ impl PeerEndpoint {
             discovery,
             peers: Arc::new(peers),
         })
+    }
+
+    /// Subscribe to the selected peer's mutually authenticated, ready connection.
+    pub fn connection(&self, peer: Fingerprint) -> Option<watch::Receiver<Option<Connection>>> {
+        self.peers
+            .get(&peer)
+            .map(|peer| peer.connection.subscribe())
     }
 
     /// Each pair has one connection, initiated by the lower full fingerprint.
@@ -228,6 +237,9 @@ impl PeerEndpoint {
 
         self.endpoint.close(0u32.into(), b"agent stopping");
         workers.shutdown().await;
+        for peer in self.peers.values() {
+            peer.connection.send_replace(None);
+        }
         let _ = timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
         if let Some(discovery) = discovery {
             discovery.shutdown().await;
@@ -274,7 +286,7 @@ impl PeerEndpoint {
 fn transport_config() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport
-        .max_concurrent_bidi_streams(VarInt::from_u32(0))
+        .max_concurrent_bidi_streams(VarInt::from_u32(1))
         .max_concurrent_uni_streams(VarInt::from_u32(1))
         .stream_receive_window(VarInt::from_u32(256))
         .receive_window(VarInt::from_u32(256))
@@ -319,7 +331,7 @@ async fn receive_peer(
     .await;
     drop(handshake_permit);
     match result {
-        Ok(Ok((connection, pin, _slot))) => track(connection, pin, &events).await,
+        Ok(Ok((connection, pin, _slot))) => track(connection, pin, &peers[&pin], &events).await,
         Ok(Err(error)) => debug!(%error, "incoming peer connection rejected"),
         Err(_) => debug!("incoming peer connection timed out"),
     }
@@ -347,7 +359,7 @@ async fn dial_peer(
         next = next.wrapping_add(1);
         match timeout(CONNECT_TIMEOUT, dial(&endpoint, address, peer)).await {
             Ok(Ok(connection)) => {
-                track(connection, pin, &events).await;
+                track(connection, pin, peer, &events).await;
                 delay = Duration::from_millis(250);
                 next = 0;
             }
@@ -401,11 +413,18 @@ async fn confirm(connection: &Connection) -> Result<(), SessionError> {
     Ok(())
 }
 
-async fn track(connection: Connection, pin: Fingerprint, events: &mpsc::Sender<PeerEvent>) {
+async fn track(
+    connection: Connection,
+    pin: Fingerprint,
+    peer: &Peer,
+    events: &mpsc::Sender<PeerEvent>,
+) {
+    peer.connection.send_replace(Some(connection.clone()));
     if events.send(PeerEvent::Connected(pin)).await.is_err() {
         return;
     }
     let error = connection.closed().await;
+    peer.connection.send_replace(None);
     debug!(peer = %pin, %error, "peer connection closed");
     let _ = events.send(PeerEvent::Disconnected(pin)).await;
 }

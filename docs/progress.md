@@ -1,11 +1,18 @@
 # Progress
 
+## 2026-11-14 — Opt-in Windows-to-Mac input session
+
+- The Windows operator verified physical F9 suppression and Ctrl+Shift+F10 delivery. The Mac injection probe had already passed on the target desktop.
+- Added one explicit input peer per agent, a reliable QUIC input stream with a grant and renewable lease, Windows capture with a bounded queue and local watchdog, and Mac synthetic key and button release on stream cleanup. Ctrl+Shift+F9 starts a session and Ctrl+Shift+F10 returns to Windows.
+- Windows formatting, strict Clippy, workspace build, and all 32 standard tests passed. The input stream test exercised both QUIC connection roles. The Windows hook installation and mDNS LAN tests passed separately. Cross-target strict Clippy passed for Apple Silicon macOS and x86-64 Linux.
+- The next check is the [two-desktop walkthrough](input-control.md), including held-input cleanup when either side disconnects. Mac-to-Windows input, Mac local activity revocation, and recovery after the Mac process is killed while injecting remain open.
+
 ## 2026-11-14 — Phase 3 native input feasibility
 
 - Added a macOS Quartz sink for physical key positions, modifiers, pointer motion, mouse buttons, and scroll. The standalone probe checks posting permission and exercises keyboard input, Shift release, cursor movement, and scrolling on request.
 - Extended the Windows probe with an explicit, ten-second physical F9 suppression check and an independent Ctrl+Shift+F10 completion shortcut.
 - Windows formatting, strict Clippy, build, all 27 standard workspace tests, and the synthetic Windows input probe passed. Cross-target Clippy passed for Apple Silicon macOS and x86-64 Linux. Cargo deny and the cached RustSec audit passed.
-- Next, exercise [both desktop probes](platform-support.md#run-the-macos-injection-probe) on the Windows PC and Mac. Then wire the approved Windows-to-Mac session over a reliable QUIC stream with explicit grant and release, an emergency return shortcut, and disconnect cleanup.
+- The Mac operator confirmed the standalone injection exercise passed. The subsequent [Windows physical suppression probe](platform-support.md#run-the-windows-probe) also passed.
 
 ## 2026-11-14 — Multiple trusted peers
 

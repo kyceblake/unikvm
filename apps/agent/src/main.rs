@@ -1,3 +1,4 @@
+mod input;
 mod peer;
 mod service;
 
@@ -53,5 +54,5 @@ fn run() -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(service::run(config.network.as_ref()))
+        .block_on(service::run(&config))
 }

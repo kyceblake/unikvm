@@ -1081,10 +1081,12 @@ name = "unikvm-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "quinn",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "unikvm-config",
+ "unikvm-core",
  "unikvm-network",
  "unikvm-platform",
  "unikvm-protocol",
@@ -1155,6 +1157,7 @@ name = "unikvm-protocol"
 version = "0.1.0"
 dependencies = [
  "tokio",
+ "unikvm-core",
 ]
 
 [[package]]

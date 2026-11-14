@@ -4,20 +4,25 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tokio::time::timeout;
-use tracing::{debug, info};
-use unikvm_config::NetworkConfig;
+use tracing::{debug, info, warn};
+use unikvm_config::Config;
 use unikvm_network::PeerEvent;
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
 use unikvm_protocol::local::{Status, respond};
 
-pub async fn run(config: Option<&NetworkConfig>) -> Result<()> {
+pub async fn run(config: &Config) -> Result<()> {
     let started = Instant::now();
     let pid = process::id();
     let shutdown = tokio::spawn(shutdown_signal());
     let mut listener = Endpoint::for_current_user()?
         .listen()
         .context("open local agent endpoint")?;
-    let network = config.map(crate::peer::bind).transpose()?;
+    let network = config.network.as_ref().map(crate::peer::bind).transpose()?;
+    let control = config
+        .input
+        .as_ref()
+        .map(|input| crate::input::Control::new(input, network.as_ref()))
+        .transpose()?;
     let peer_service = network.map(|endpoint| {
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(endpoint.run_until(
@@ -33,7 +38,22 @@ pub async fn run(config: Option<&NetworkConfig>) -> Result<()> {
     });
     info!(pid, "local agent ready");
 
-    let local = serve(&mut listener, shutdown, pid, started).await;
+    let local = async {
+        let local = serve(&mut listener, shutdown, pid, started);
+        let control = async {
+            if let Some(control) = control
+                && let Err(error) = control.run().await
+            {
+                warn!(%error, "input control stopped");
+            }
+            std::future::pending::<()>().await;
+        };
+        tokio::select! {
+            result = local => result,
+            () = control => unreachable!(),
+        }
+    }
+    .await;
     if let Some((stop, worker)) = peer_service {
         let _ = stop.send(());
         worker.await.context("join peer transport task")?;

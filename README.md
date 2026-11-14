@@ -26,4 +26,4 @@ schema_version = 1
 log_level = "info"
 ```
 
-For two-device networking, follow [manual pairing](docs/manual-pairing.md). See [progress and verification](docs/progress.md), [architecture](docs/architecture.md), [platform support and probe commands](docs/platform-support.md), and [dependency decisions](docs/dependencies.md).
+For two-device networking, follow [manual pairing](docs/manual-pairing.md). Then follow the [Windows-to-Mac input walkthrough](docs/input-control.md) to exercise the opt-in session. See [progress and verification](docs/progress.md), [architecture](docs/architecture.md), [platform support and probe commands](docs/platform-support.md), and [dependency decisions](docs/dependencies.md).
