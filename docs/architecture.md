@@ -1,6 +1,6 @@
 # Architecture
 
-Each installation runs a headless user-session agent. Opt-in networking gives each agent one QUIC endpoint capable of accepting and initiating direct connections. For the first milestone the agents configure exactly one peer, and the lower certificate fingerprint initiates the connection. The CLI and future TUI are local clients and may exit independently of the agent.
+Each installation runs a headless user-session agent. Opt-in networking gives each agent one QUIC endpoint for direct connections to up to 16 explicitly trusted peers. The lower certificate fingerprint initiates each pair's connection. The receiver checks that direction and admits one session per peer. Each outgoing connection has its own reconnect loop, and the listener handles incoming handshakes concurrently. The CLI and future TUI are local clients and may exit independently of the agent.
 
 ## Workspace boundaries
 

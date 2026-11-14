@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::time::Duration;
@@ -33,15 +34,10 @@ pub(crate) struct Discovery {
     events: Receiver<ServiceEvent>,
     interface: LanInterface,
     fullname: String,
-    target: String,
 }
 
 impl Discovery {
-    pub(crate) fn start(
-        local: SocketAddr,
-        own: Fingerprint,
-        peer: Fingerprint,
-    ) -> Result<Self, DiscoveryError> {
+    pub(crate) fn start(local: SocketAddr, own: Fingerprint) -> Result<Self, DiscoveryError> {
         let interface = LanInterface::for_address(local)?;
         let name = own.to_string();
         // The full fingerprint fits in a TXT record. A shorter hex label keeps DNS names valid.
@@ -71,46 +67,49 @@ impl Discovery {
             let _ = daemon.shutdown();
         })?;
 
-        let target = peer.to_string();
-        let target = format!("{}.{SERVICE_TYPE}", &target[..32]);
         Ok(Self {
             daemon,
             events,
             interface,
             fullname,
-            target,
         })
     }
 
     pub(crate) async fn browse(
         &self,
-        expected: Fingerprint,
-        addresses: watch::Sender<Vec<SocketAddr>>,
+        addresses: &BTreeMap<Fingerprint, watch::Sender<Vec<SocketAddr>>>,
     ) {
+        let targets: BTreeMap<_, _> = addresses
+            .iter()
+            .map(|(&pin, sender)| {
+                let hex = pin.to_string();
+                (format!("{}.{SERVICE_TYPE}", &hex[..32]), (pin, sender))
+            })
+            .collect();
         while let Ok(event) = self.events.recv_async().await {
-            let candidates = match event {
-                ServiceEvent::ServiceResolved(service)
-                    if service.fullname.eq_ignore_ascii_case(&self.target) =>
-                {
-                    self.interface.candidates(&service, expected)
-                }
-                ServiceEvent::ServiceRemoved(_, name)
-                    if name.eq_ignore_ascii_case(&self.target) =>
-                {
-                    Vec::new()
-                }
+            let (name, service) = match &event {
+                ServiceEvent::ServiceResolved(service) => (&service.fullname, Some(service)),
+                ServiceEvent::ServiceRemoved(_, name) => (name, None),
                 _ => continue,
             };
-            addresses.send_if_modified(|current| {
+            let Some(&(pin, sender)) = targets.get(&name.to_ascii_lowercase()) else {
+                continue;
+            };
+            let candidates = service
+                .map(|service| self.interface.candidates(service, pin))
+                .unwrap_or_default();
+            sender.send_if_modified(|current| {
                 if *current == candidates {
                     return false;
                 }
                 *current = candidates;
-                debug!(target_addresses = ?current, "updated mDNS address hints for configured peer");
+                debug!(peer = %pin, target_addresses = ?current, "updated mDNS address hints for configured peer");
                 true
             });
         }
-        addresses.send_replace(Vec::new());
+        for sender in addresses.values() {
+            sender.send_replace(Vec::new());
+        }
         warn!("mDNS browser stopped");
     }
 
@@ -313,8 +312,8 @@ mod tests {
         let approve = |identity: &Identity| {
             TrustedPeer::approve(identity.certificate().to_vec(), identity.fingerprint()).unwrap()
         };
-        let endpoint_a = PeerEndpoint::bind(local, None, true, &a, approve(&b)).unwrap();
-        let endpoint_b = PeerEndpoint::bind(local, None, true, &b, approve(&a)).unwrap();
+        let endpoint_a = PeerEndpoint::bind(local, true, &a, vec![(approve(&b), None)]).unwrap();
+        let endpoint_b = PeerEndpoint::bind(local, true, &b, vec![(approve(&a), None)]).unwrap();
         let (events, mut received) = mpsc::channel(4);
         let (stop_a, stopped_a) = oneshot::channel::<()>();
         let (stop_b, stopped_b) = oneshot::channel::<()>();

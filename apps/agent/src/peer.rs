@@ -10,19 +10,19 @@ pub fn bind(config: &NetworkConfig) -> Result<PeerEndpoint> {
     let bytes = credential::read(&config.identity, MAX_IDENTITY_SIZE)
         .with_context(|| format!("read local identity {}", config.identity.display()))?;
     let identity = Identity::from_bytes(&bytes)?;
-    let file = File::open(&config.peer_certificate).with_context(|| {
-        format!(
-            "open peer certificate {}",
-            config.peer_certificate.display()
-        )
-    })?;
-    let peer = TrustedPeer::read(file, config.peer_fingerprint.parse()?)?;
-    PeerEndpoint::bind(
-        config.listen,
-        config.peer,
-        config.discovery,
-        &identity,
-        peer,
-    )
-    .context("start authenticated peer endpoint")
+    let peers = config
+        .peers
+        .iter()
+        .map(|peer| {
+            let file = File::open(&peer.certificate)
+                .with_context(|| format!("open peer certificate {}", peer.certificate.display()))?;
+            let approved =
+                TrustedPeer::read(file, peer.fingerprint.parse()?).with_context(|| {
+                    format!("verify peer certificate {}", peer.certificate.display())
+                })?;
+            Ok((approved, peer.address))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    PeerEndpoint::bind(config.listen, config.discovery, &identity, peers)
+        .context("start authenticated peer endpoint")
 }

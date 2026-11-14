@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-11-14 — Multiple trusted peers
+
+- Verified PC-to-Mac discovery with the Windows dialer configured without a manual address. Its log recorded the Mac's mDNS address and an authenticated QUIC connection.
+- Added multiple approved peers per agent on one QUIC endpoint. Each pair has a deterministic dial direction, one accepted session, and independent reconnect. Existing single-peer configs still load.
+- Windows formatting, strict Clippy, workspace build, and 27 standard tests passed. The three-agent loopback test established all three direct pairwise connections, kept the surviving pair connected while the third restarted, and verified both of its connections returned. Duplicate-session and unknown-certificate rejection passed. The Windows multicast test also passed with the updated transport. Cross-target Clippy passed for Apple Silicon macOS and x86-64 Linux.
+- The existing Windows–Mac agents are still on the verified discovery build. Next, run the mesh revision on both machines and validate reciprocal connections with a third instance. The next implementation milestone is Phase 3 input control, starting with native input probes and the shortcut-based return-to-local flow.
+
 ## 2026-11-14 — mDNS address discovery for an approved peer
 
 - Verified manual pairing on the Windows PC and Mac over the LAN. The Windows agent reported an authenticated connection to the Mac, and the Mac operator confirmed its side.

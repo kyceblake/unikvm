@@ -30,17 +30,27 @@ pub struct Config {
     pub network: Option<NetworkConfig>,
 }
 
-/// Explicit local UDP bind and manual peer approval for a single pair.
+/// Explicit local UDP bind and manually approved peers.
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkConfig {
     pub listen: SocketAddr,
-    pub peer: Option<SocketAddr>,
     #[serde(default)]
     pub discovery: bool,
     pub identity: PathBuf,
-    pub peer_certificate: PathBuf,
-    pub peer_fingerprint: String,
+    #[serde(default)]
+    pub peers: Vec<PeerConfig>,
+    peer: Option<SocketAddr>,
+    peer_certificate: Option<PathBuf>,
+    peer_fingerprint: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerConfig {
+    pub address: Option<SocketAddr>,
+    pub certificate: PathBuf,
+    pub fingerprint: String,
 }
 
 impl Default for Config {
@@ -67,6 +77,12 @@ pub enum ConfigError {
     NetworkAddress,
     #[error("configure a manual peer address or enable discovery")]
     PeerAddressRequired,
+    #[error("configure at least one trusted peer")]
+    NoPeers,
+    #[error(
+        "the single-peer format requires both peer_certificate and peer_fingerprint and cannot be mixed with [[network.peers]]"
+    )]
+    LegacyPeer,
     #[error("discovery requires listen to use a specific non-loopback LAN address")]
     DiscoveryAddress,
 }
@@ -77,28 +93,52 @@ impl Config {
         if let Some(network) = &mut config.network {
             let directory = path.parent().unwrap_or_else(|| Path::new("."));
             network.identity = directory.join(&network.identity);
-            network.peer_certificate = directory.join(&network.peer_certificate);
+            for peer in &mut network.peers {
+                peer.certificate = directory.join(&peer.certificate);
+            }
         }
         Ok(config)
     }
 
     pub fn parse(source: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(source)?;
+        let mut config: Self = toml::from_str(source)?;
         if config.schema_version != SCHEMA_VERSION {
             return Err(ConfigError::Version(config.schema_version));
         }
-        if let Some(network) = &config.network {
+        if let Some(network) = &mut config.network {
+            match (
+                network.peer.take(),
+                network.peer_certificate.take(),
+                network.peer_fingerprint.take(),
+            ) {
+                (None, None, None) => {}
+                (address, Some(certificate), Some(fingerprint)) if network.peers.is_empty() => {
+                    network.peers.push(PeerConfig {
+                        address,
+                        certificate,
+                        fingerprint,
+                    });
+                }
+                _ => return Err(ConfigError::LegacyPeer),
+            }
+            if network.peers.is_empty() {
+                return Err(ConfigError::NoPeers);
+            }
             if network.listen.port() == 0
                 || network.listen.ip().is_multicast()
                 || network.listen.ip() == std::net::Ipv4Addr::BROADCAST
-                || network.peer.is_some_and(|peer| {
-                    let ip = peer.ip();
-                    network.listen.is_ipv4() != peer.is_ipv4()
-                        || peer.port() == 0
-                        || ip.is_unspecified()
-                        || ip.is_multicast()
-                        || ip == std::net::Ipv4Addr::BROADCAST
-                })
+                || network
+                    .peers
+                    .iter()
+                    .filter_map(|peer| peer.address)
+                    .any(|address| {
+                        let ip = address.ip();
+                        network.listen.is_ipv4() != address.is_ipv4()
+                            || address.port() == 0
+                            || ip.is_unspecified()
+                            || ip.is_multicast()
+                            || ip == std::net::Ipv4Addr::BROADCAST
+                    })
             {
                 return Err(ConfigError::NetworkAddress);
             }
@@ -107,7 +147,7 @@ impl Config {
                 if ip.is_unspecified() || ip.is_loopback() {
                     return Err(ConfigError::DiscoveryAddress);
                 }
-            } else if network.peer.is_none() {
+            } else if network.peers.iter().any(|peer| peer.address.is_none()) {
                 return Err(ConfigError::PeerAddressRequired);
             }
         }
@@ -161,11 +201,8 @@ peer_fingerprint = "fingerprint"
 "#;
         assert!(Config::default().network.is_none());
         assert_eq!(
-            Config::parse(settings)
-                .unwrap()
-                .network
-                .unwrap()
-                .peer
+            Config::parse(settings).unwrap().network.unwrap().peers[0]
+                .address
                 .unwrap()
                 .port(),
             24800
@@ -196,7 +233,7 @@ peer_fingerprint = "fingerprint"
 "#;
         let network = Config::parse(settings).unwrap().network.unwrap();
         assert!(network.discovery);
-        assert!(network.peer.is_none());
+        assert!(network.peers[0].address.is_none());
         assert!(matches!(
             Config::parse(&settings.replace("discovery = true", "discovery = false")),
             Err(ConfigError::PeerAddressRequired)
@@ -207,5 +244,39 @@ peer_fingerprint = "fingerprint"
                 Err(ConfigError::DiscoveryAddress)
             ));
         }
+    }
+
+    #[test]
+    fn parses_multiple_peers_and_rejects_ambiguous_or_missing_approval() {
+        let source = r#"
+schema_version = 1
+[network]
+listen = "192.168.1.7:24800"
+discovery = true
+identity = "identity.bin"
+
+[[network.peers]]
+address = "192.168.1.8:24800"
+certificate = "a.der"
+fingerprint = "a"
+
+[[network.peers]]
+certificate = "b.der"
+fingerprint = "b"
+"#;
+        let network = Config::parse(source).unwrap().network.unwrap();
+        assert_eq!(network.peers.len(), 2);
+        assert!(network.peers[0].address.is_some());
+        assert!(network.peers[1].address.is_none());
+        let mixed = source.replace(
+            "identity = \"identity.bin\"",
+            "identity = \"identity.bin\"\npeer = \"192.168.1.9:24800\"",
+        );
+        assert!(matches!(
+            Config::parse(&mixed),
+            Err(ConfigError::LegacyPeer)
+        ));
+        let empty = source.split("[[network.peers]]").next().unwrap();
+        assert!(matches!(Config::parse(empty), Err(ConfigError::NoPeers)));
     }
 }

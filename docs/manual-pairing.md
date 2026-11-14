@@ -52,3 +52,29 @@ After manual pairing works, add `discovery = true` under `[network]` on both mac
 You can keep `peer` as an explicit address. The dialer tries it first, then tries discovered addresses if the connection fails. To test discovery by itself, remove the `peer` line from both configs and restart the agents. With debug logging enabled, look for `updated mDNS address hints for configured peer` on the dialer and `authenticated peer connected` on both machines.
 
 Discovery needs local multicast DNS on UDP 5353 and runs on one configured address family and interface at a time. The QUIC connection still needs its own UDP port. When multicast is unavailable, restore the `peer` entry and set `discovery = false`. If this machine's own address changes, update `listen`. Discovery can learn the other machine's new address once it advertises there.
+
+## Pair three or more machines
+
+For each machine, exchange and verify the public certificate and fingerprint of every peer it should connect to. Use separate filenames for the certificates. Replace the single-peer keys `peer`, `peer_certificate`, and `peer_fingerprint` with one `[[network.peers]]` table per approved peer. Existing single-peer configs still work.
+
+```toml
+schema_version = 1
+
+[network]
+listen = "192.168.1.10:24800"
+identity = "identity.bin"
+discovery = true
+
+[[network.peers]]
+certificate = "mac.der"
+fingerprint = "MAC_FINGERPRINT"
+
+[[network.peers]]
+address = "192.168.1.30:24800"
+certificate = "third-machine.der"
+fingerprint = "THIRD_MACHINE_FINGERPRINT"
+```
+
+Each agent supports up to 16 trusted peers. Paths are relative to the config file. Set `address` for each peer when discovery is disabled. To revoke approval for one peer, remove its table and restart the agent. Remove the entire `[network]` section to disable peer connections.
+
+With three mutually approved agents running, each should report two authenticated connections. Stop one agent and verify the remaining agents each log a disconnect for that fingerprint only. Restart that agent and verify both of its connections return.

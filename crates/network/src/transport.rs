@@ -1,33 +1,42 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::{Connection, Endpoint, TransportConfig, VarInt};
+use quinn::{Connection, Endpoint, Incoming, TransportConfig, VarInt};
 use rustls::client::Resumption;
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, version};
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
+use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 use unikvm_protocol::peer::{ALPN, READY};
 
-use crate::discovery::Discovery;
+use crate::discovery::{Discovery, DiscoveryError};
 use crate::identity::{Fingerprint, Identity, TLS_NAME, TrustedPeer};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RETRY: Duration = Duration::from_secs(8);
+const MAX_PEERS: usize = 16;
+const MAX_HANDSHAKES: usize = 8;
 
 pub struct PeerEndpoint {
     endpoint: Endpoint,
+    own: Fingerprint,
+    discovery: bool,
+    peers: Arc<BTreeMap<Fingerprint, Peer>>,
+}
+
+struct Peer {
+    trusted: TrustedPeer,
+    manual: Option<SocketAddr>,
     client: quinn::ClientConfig,
-    address: Option<SocketAddr>,
-    advertise: Option<Fingerprint>,
-    peer: TrustedPeer,
-    dialer: bool,
+    incoming_slot: Semaphore,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,8 +47,12 @@ pub enum PeerEvent {
 
 #[derive(Debug, Error)]
 pub enum BindError {
+    #[error("configure between 1 and {MAX_PEERS} trusted peers")]
+    PeerCount,
     #[error("local and trusted peer certificates must differ")]
     SelfPairing,
+    #[error("trusted peer {0} is configured more than once")]
+    DuplicatePeer(Fingerprint),
     #[error("invalid TLS identity or trusted certificate")]
     Tls(#[from] rustls::Error),
     #[error("could not build client certificate verifier")]
@@ -58,8 +71,12 @@ enum SessionError {
     Connection(#[from] quinn::ConnectionError),
     #[error("could not start connection: {0}")]
     Connect(#[from] quinn::ConnectError),
-    #[error("peer did not present the approved certificate")]
+    #[error("peer did not present an approved certificate")]
     Identity,
+    #[error("incoming connection does not match the configured address or dial direction")]
+    UnexpectedPeer,
+    #[error("peer already has an active session")]
+    Duplicate,
     #[error("invalid peer readiness frame")]
     Ready,
     #[error("could not send readiness frame: {0}")]
@@ -68,229 +85,329 @@ enum SessionError {
     Finish(#[from] quinn::ClosedStream),
     #[error("could not receive readiness frame: {0}")]
     Receive(#[from] quinn::ReadToEndError),
-    #[error("endpoint is closed")]
-    Closed,
 }
 
 impl PeerEndpoint {
     pub fn bind(
         local: SocketAddr,
-        address: Option<SocketAddr>,
         discovery: bool,
         identity: &Identity,
-        peer: TrustedPeer,
+        approved: Vec<(TrustedPeer, Option<SocketAddr>)>,
     ) -> Result<Self, BindError> {
+        if !(1..=MAX_PEERS).contains(&approved.len()) {
+            return Err(BindError::PeerCount);
+        }
         let own = identity.fingerprint();
-        if own == peer.fingerprint {
-            return Err(BindError::SelfPairing);
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let transport = transport_config();
+        let mut roots = RootCertStore::empty();
+        let mut peers = BTreeMap::new();
+        for (trusted, manual) in approved {
+            let pin = trusted.fingerprint;
+            if pin == own {
+                return Err(BindError::SelfPairing);
+            }
+            if peers.contains_key(&pin) {
+                return Err(BindError::DuplicatePeer(pin));
+            }
+
+            // A dial to a specific peer must authenticate that peer's certificate.
+            let mut peer_root = RootCertStore::empty();
+            peer_root.add(trusted.certificate.clone())?;
+            roots.roots.extend(peer_root.roots.iter().cloned());
+            let (certs, key) = identity.tls_credentials();
+            let mut client = rustls::ClientConfig::builder_with_provider(provider.clone())
+                .with_protocol_versions(&[&version::TLS13])?
+                .with_root_certificates(peer_root)
+                .with_client_auth_cert(certs, key)?;
+            client.alpn_protocols = vec![ALPN.to_vec()];
+            client.resumption = Resumption::disabled();
+            let mut client =
+                quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client)?));
+            client.transport_config(transport.clone());
+
+            peers.insert(
+                pin,
+                Peer {
+                    trusted,
+                    manual,
+                    client,
+                    incoming_slot: Semaphore::new(1),
+                },
+            );
         }
 
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let mut roots = RootCertStore::empty();
-        roots.add(peer.certificate.clone())?;
         let verifier =
-            WebPkiClientVerifier::builder_with_provider(Arc::new(roots.clone()), provider.clone())
+            WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone())
                 .build()?;
-
         let (certs, key) = identity.tls_credentials();
-        let mut server = rustls::ServerConfig::builder_with_provider(provider.clone())
+        let mut server = rustls::ServerConfig::builder_with_provider(provider)
             .with_protocol_versions(&[&version::TLS13])?
             .with_client_cert_verifier(verifier)
             .with_single_cert(certs, key)?;
         server.alpn_protocols = vec![ALPN.to_vec()];
         server.send_tls13_tickets = 0;
-
-        let (certs, key) = identity.tls_credentials();
-        let mut client = rustls::ClientConfig::builder_with_provider(provider)
-            .with_protocol_versions(&[&version::TLS13])?
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certs, key)?;
-        client.alpn_protocols = vec![ALPN.to_vec()];
-        client.resumption = Resumption::disabled();
-
-        let mut transport = TransportConfig::default();
-        transport
-            .max_concurrent_bidi_streams(VarInt::from_u32(0))
-            .max_concurrent_uni_streams(VarInt::from_u32(1))
-            .stream_receive_window(VarInt::from_u32(256))
-            .receive_window(VarInt::from_u32(256))
-            .datagram_receive_buffer_size(None)
-            .datagram_send_buffer_size(0)
-            .keep_alive_interval(Some(Duration::from_secs(3)))
-            .max_idle_timeout(Some(quinn::IdleTimeout::from(VarInt::from_u32(10_000))));
-        let transport = Arc::new(transport);
         let mut server =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server)?));
-        server.transport_config(transport.clone());
-        let mut client = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client)?));
-        client.transport_config(transport);
-
+        server.transport_config(transport);
         server
-            .max_incoming(8)
+            .max_incoming(MAX_HANDSHAKES)
             .incoming_buffer_size(16 * 1024)
             .incoming_buffer_size_total(64 * 1024);
         let endpoint = Endpoint::server(server, local)?;
         Ok(Self {
             endpoint,
-            client,
-            address,
-            advertise: discovery.then_some(own),
-            dialer: own < peer.fingerprint,
-            peer,
+            own,
+            discovery,
+            peers: Arc::new(peers),
         })
     }
 
-    #[cfg(test)]
-    fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.endpoint.local_addr()
-    }
-
-    /// Both endpoints can listen and dial. The lower full fingerprint initiates this pair.
+    /// Each pair has one connection, initiated by the lower full fingerprint.
     pub async fn run_until(
         self,
         shutdown: impl Future<Output = ()>,
         mut on_event: impl FnMut(PeerEvent),
     ) {
-        let discovery = self.advertise.and_then(|own| {
-            self.endpoint
-                .local_addr()
-                .map_err(crate::discovery::DiscoveryError::from)
-                .and_then(|local| Discovery::start(local, own, self.peer.fingerprint))
-                .inspect_err(|error| warn!(%error, "could not start mDNS discovery"))
-                .ok()
-        });
-        let (addresses, hints) = watch::channel(Vec::new());
+        let discovery = self
+            .discovery
+            .then(|| {
+                self.endpoint
+                    .local_addr()
+                    .map_err(DiscoveryError::from)
+                    .and_then(|local| Discovery::start(local, self.own))
+                    .inspect_err(|error| warn!(%error, "could not start mDNS discovery"))
+                    .ok()
+            })
+            .flatten();
+        let mut workers = JoinSet::new();
+        let (events, mut received) = mpsc::channel(MAX_PEERS * 2);
+        let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
+        let mut hints = BTreeMap::new();
+        for (&pin, peer) in self.peers.iter() {
+            let dialer = self.own < pin;
+            info!(peer = %pin, manual_address = ?peer.manual, discovery = self.discovery, dialer, "peer transport ready");
+            if dialer {
+                let (addresses, receiver) = watch::channel(Vec::new());
+                hints.insert(pin, addresses);
+                workers.spawn(dial_peer(
+                    self.endpoint.clone(),
+                    self.peers.clone(),
+                    pin,
+                    receiver,
+                    events.clone(),
+                ));
+            }
+        }
+
         {
             let browse = async {
                 if let Some(discovery) = &discovery {
-                    discovery.browse(self.peer.fingerprint, addresses).await;
+                    discovery.browse(&hints).await;
                 }
                 std::future::pending::<()>().await;
             };
-            tokio::select! {
-                () = self.maintain(&mut on_event, hints) => {}
-                () = shutdown => {}
-                () = browse => {}
+            tokio::pin!(browse, shutdown);
+            loop {
+                tokio::select! {
+                    () = &mut shutdown => break,
+                    () = &mut browse => break,
+                    Some(event) = received.recv() => on_event(event),
+                    Some(result) = workers.join_next(), if !workers.is_empty() => {
+                        if let Err(error) = result {
+                            warn!(%error, "peer worker stopped unexpectedly");
+                        }
+                    }
+                    incoming = self.endpoint.accept() => {
+                        let Some(incoming) = incoming else { break };
+                        self.accept(incoming, &handshakes, &events, &mut workers);
+                    }
+                }
             }
         }
+
         self.endpoint.close(0u32.into(), b"agent stopping");
+        workers.shutdown().await;
         let _ = timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
         if let Some(discovery) = discovery {
             discovery.shutdown().await;
         }
     }
 
-    async fn maintain(
+    fn accept(
         &self,
-        on_event: &mut impl FnMut(PeerEvent),
-        mut hints: watch::Receiver<Vec<SocketAddr>>,
+        incoming: Incoming,
+        handshakes: &Arc<Semaphore>,
+        events: &mpsc::Sender<PeerEvent>,
+        workers: &mut JoinSet<()>,
     ) {
-        info!(peer = %self.peer.fingerprint, manual_address = ?self.address, discovery = self.advertise.is_some(), dialer = self.dialer, "peer transport ready");
-        let mut delay = Duration::from_millis(250);
-        let mut next = 0usize;
-        loop {
-            let result = if self.dialer {
-                let candidates = dial_candidates(self.address, &hints.borrow_and_update());
-                if candidates.is_empty() {
-                    if hints.changed().await.is_err() {
-                        return;
-                    }
-                    continue;
-                }
-                let address = candidates[next % candidates.len()];
-                next = next.wrapping_add(1);
-                self.dial(address).await
-            } else {
-                self.receive().await
-            };
-            match result {
-                Ok(connection) => {
-                    on_event(PeerEvent::Connected(self.peer.fingerprint));
-                    let error = connection.closed().await;
-                    debug!(peer = %self.peer.fingerprint, %error, "peer connection closed");
-                    on_event(PeerEvent::Disconnected(self.peer.fingerprint));
-                    delay = Duration::from_millis(250);
-                }
-                Err(SessionError::Closed) => return,
-                Err(error) => {
-                    debug!(peer = %self.peer.fingerprint, %error, "peer connection failed")
-                }
-            }
-            if self.dialer {
-                tokio::select! {
-                    () = sleep(delay) => delay = (delay * 2).min(MAX_RETRY),
-                    () = async {
-                        if hints.changed().await.is_err() {
-                            std::future::pending::<()>().await;
-                        }
-                    } => {
-                        delay = Duration::from_millis(250);
-                        next = 0;
-                    }
-                }
-            }
+        if !self.discovery
+            && !self.peers.iter().any(|(&pin, peer)| {
+                pin < self.own
+                    && peer
+                        .manual
+                        .is_some_and(|address| address.ip() == incoming.remote_address().ip())
+            })
+        {
+            incoming.refuse();
+            return;
         }
-    }
-
-    async fn dial(&self, address: SocketAddr) -> Result<Connection, SessionError> {
-        timeout(CONNECT_TIMEOUT, async {
-            let connection = self
-                .endpoint
-                .connect_with(self.client.clone(), address, TLS_NAME)?
-                .await?;
-            self.confirm(connection).await
-        })
-        .await
-        .map_err(|_| SessionError::Timeout)?
-    }
-
-    async fn receive(&self) -> Result<Connection, SessionError> {
-        let incoming = loop {
-            let incoming = self.endpoint.accept().await.ok_or(SessionError::Closed)?;
-            if self.advertise.is_none()
-                && self
-                    .address
-                    .is_some_and(|address| incoming.remote_address().ip() != address.ip())
-            {
-                incoming.refuse();
-                continue;
-            }
-            if !incoming.remote_address_validated() {
-                let _ = incoming.retry();
-                continue;
-            }
-            break incoming;
+        if !incoming.remote_address_validated() {
+            let _ = incoming.retry();
+            return;
+        }
+        let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+            incoming.refuse();
+            return;
         };
-        timeout(CONNECT_TIMEOUT, async {
-            let connection = incoming.await?;
-            self.confirm(connection).await
-        })
-        .await
-        .map_err(|_| SessionError::Timeout)?
+        workers.spawn(receive_peer(
+            incoming,
+            self.peers.clone(),
+            self.own,
+            self.discovery,
+            permit,
+            events.clone(),
+        ));
     }
+}
 
-    async fn confirm(&self, connection: Connection) -> Result<Connection, SessionError> {
-        let leaf = connection
-            .peer_identity()
-            .and_then(|identity| identity.downcast::<Vec<CertificateDer<'static>>>().ok())
-            .filter(|certificates| {
-                certificates.len() == 1 && certificates[0] == self.peer.certificate
-            });
-        if leaf.is_none() {
-            connection.close(1u32.into(), b"peer identity mismatch");
-            return Err(SessionError::Identity);
-        }
+fn transport_config() -> Arc<TransportConfig> {
+    let mut transport = TransportConfig::default();
+    transport
+        .max_concurrent_bidi_streams(VarInt::from_u32(0))
+        .max_concurrent_uni_streams(VarInt::from_u32(1))
+        .stream_receive_window(VarInt::from_u32(256))
+        .receive_window(VarInt::from_u32(256))
+        .datagram_receive_buffer_size(None)
+        .datagram_send_buffer_size(0)
+        .keep_alive_interval(Some(Duration::from_secs(3)))
+        .max_idle_timeout(Some(quinn::IdleTimeout::from(VarInt::from_u32(10_000))));
+    Arc::new(transport)
+}
 
-        let mut send = connection.open_uni().await?;
-        send.write_all(READY).await?;
-        send.finish()?;
-        let mut receive = connection.accept_uni().await?;
-        if receive.read_to_end(READY.len()).await? != READY {
-            connection.close(1u32.into(), b"invalid peer readiness");
-            return Err(SessionError::Ready);
+async fn receive_peer(
+    incoming: Incoming,
+    peers: Arc<BTreeMap<Fingerprint, Peer>>,
+    own: Fingerprint,
+    discovery: bool,
+    handshake_permit: OwnedSemaphorePermit,
+    events: mpsc::Sender<PeerEvent>,
+) {
+    let result = timeout(CONNECT_TIMEOUT, async {
+        let connection = incoming.await?;
+        let certificate = presented_leaf(&connection)?;
+        let pin = Fingerprint::for_certificate(&certificate);
+        let peer = peers
+            .get(&pin)
+            .filter(|peer| peer.trusted.certificate == certificate)
+            .ok_or(SessionError::Identity)?;
+        if pin >= own
+            || (!discovery
+                && !peer
+                    .manual
+                    .is_some_and(|address| address.ip() == connection.remote_address().ip()))
+        {
+            return Err(SessionError::UnexpectedPeer);
         }
-        Ok(connection)
+        let slot = peer
+            .incoming_slot
+            .try_acquire()
+            .map_err(|_| SessionError::Duplicate)?;
+        confirm(&connection).await?;
+        Ok::<_, SessionError>((connection, pin, slot))
+    })
+    .await;
+    drop(handshake_permit);
+    match result {
+        Ok(Ok((connection, pin, _slot))) => track(connection, pin, &events).await,
+        Ok(Err(error)) => debug!(%error, "incoming peer connection rejected"),
+        Err(_) => debug!("incoming peer connection timed out"),
     }
+}
+
+async fn dial_peer(
+    endpoint: Endpoint,
+    peers: Arc<BTreeMap<Fingerprint, Peer>>,
+    pin: Fingerprint,
+    mut hints: watch::Receiver<Vec<SocketAddr>>,
+    events: mpsc::Sender<PeerEvent>,
+) {
+    let peer = &peers[&pin];
+    let mut delay = Duration::from_millis(250);
+    let mut next = 0usize;
+    loop {
+        let candidates = dial_candidates(peer.manual, &hints.borrow_and_update());
+        if candidates.is_empty() {
+            if hints.changed().await.is_err() {
+                return;
+            }
+            continue;
+        }
+        let address = candidates[next % candidates.len()];
+        next = next.wrapping_add(1);
+        match timeout(CONNECT_TIMEOUT, dial(&endpoint, address, peer)).await {
+            Ok(Ok(connection)) => {
+                track(connection, pin, &events).await;
+                delay = Duration::from_millis(250);
+                next = 0;
+            }
+            Ok(Err(error)) => debug!(peer = %pin, %address, %error, "peer connection failed"),
+            Err(_) => {
+                debug!(peer = %pin, %address, error = %SessionError::Timeout, "peer connection failed")
+            }
+        }
+        tokio::select! {
+            () = sleep(delay) => delay = (delay * 2).min(MAX_RETRY),
+            Ok(()) = hints.changed() => {
+                delay = Duration::from_millis(250);
+                next = 0;
+            }
+        }
+    }
+}
+
+async fn dial(
+    endpoint: &Endpoint,
+    address: SocketAddr,
+    peer: &Peer,
+) -> Result<Connection, SessionError> {
+    let connection = endpoint
+        .connect_with(peer.client.clone(), address, TLS_NAME)?
+        .await?;
+    if presented_leaf(&connection)? != peer.trusted.certificate {
+        return Err(SessionError::Identity);
+    }
+    confirm(&connection).await?;
+    Ok(connection)
+}
+
+fn presented_leaf(connection: &Connection) -> Result<CertificateDer<'static>, SessionError> {
+    connection
+        .peer_identity()
+        .and_then(|identity| identity.downcast::<Vec<CertificateDer<'static>>>().ok())
+        .filter(|certificates| certificates.len() == 1)
+        .and_then(|mut certificates| certificates.pop())
+        .ok_or(SessionError::Identity)
+}
+
+async fn confirm(connection: &Connection) -> Result<(), SessionError> {
+    let mut send = connection.open_uni().await?;
+    send.write_all(READY).await?;
+    send.finish()?;
+    let mut receive = connection.accept_uni().await?;
+    if receive.read_to_end(READY.len()).await? != READY {
+        return Err(SessionError::Ready);
+    }
+    Ok(())
+}
+
+async fn track(connection: Connection, pin: Fingerprint, events: &mpsc::Sender<PeerEvent>) {
+    if events.send(PeerEvent::Connected(pin)).await.is_err() {
+        return;
+    }
+    let error = connection.closed().await;
+    debug!(peer = %pin, %error, "peer connection closed");
+    let _ = events.send(PeerEvent::Disconnected(pin)).await;
 }
 
 fn dial_candidates(manual: Option<SocketAddr>, hints: &[SocketAddr]) -> Vec<SocketAddr> {

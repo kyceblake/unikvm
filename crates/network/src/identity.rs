@@ -139,7 +139,7 @@ impl TrustedPeer {
 }
 
 impl Fingerprint {
-    fn for_certificate(certificate: &[u8]) -> Self {
+    pub(crate) fn for_certificate(certificate: &[u8]) -> Self {
         let hash = digest(&SHA256, certificate);
         let mut bytes = [0; 32];
         bytes.copy_from_slice(hash.as_ref());
