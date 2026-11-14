@@ -1,0 +1,19 @@
+[package]
+name = "unikvm-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "unikvm"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+unikvm-platform.workspace = true
+unikvm-protocol.workspace = true
+tokio.workspace = true
