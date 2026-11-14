@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-14 — Japanese IME takeover on Windows
+
+- Two Mac-to-Windows tests reproduced a false local takeover when Cmd+Space selected Japanese. Both traces showed an untagged key release at the input-language switch, and the authenticated peer connection stayed up.
+- Windows keyboard takeover now requires a key press. Key releases still go through the normal capture path. The regression test verifies that an untagged release leaves the takeover signal unchanged and a press triggers it.
+- Windows workspace checks and desktop input probes passed. The operator confirmed the Japanese switch worked over the patched Mac-to-Windows session.
+
 ## 2026-11-15 — macOS sender cursor drift recovery
 
 - Fixed visible movement of the Mac sender's cursor by hiding it during capture and returning it to its saved anchor before showing it on release. Capture retains the anchor even after disassociation succeeds and corrects drift on mouse callbacks and monitor polls. Hide/show and reassociation are scoped to capture cleanup.

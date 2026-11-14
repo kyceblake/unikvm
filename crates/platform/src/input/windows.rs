@@ -194,7 +194,11 @@ impl HookState {
 
     fn key(&mut self, event: &KBDLLHOOKSTRUCT, pressed: bool) -> bool {
         self.check_capture_command();
-        activity(&self.shortcuts);
+        // Switching to the Japanese IME can produce an untagged key release
+        // during remote injection. A physical press already reclaims control.
+        if pressed {
+            activity(&self.shortcuts);
+        }
         let usage = key_usage(event.scanCode, event.flags & LLKHF_EXTENDED != 0);
         if let Some(usage @ 0xe0..=0xe7) = usage {
             self.down[usize::from(usage - 0xe0)] = pressed;
@@ -482,7 +486,30 @@ pub(super) fn key_usage(scan: u32, extended: bool) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::{KBDLLHOOKSTRUCT, VK_F9, VK_F10, key_usage};
+    use super::*;
+
+    fn hook_state(
+        shortcuts: watch::Sender<Shortcut>,
+        events: mpsc::Sender<InputEvent>,
+    ) -> HookState {
+        HookState {
+            commands: watch::channel(Command::Local).1,
+            shortcuts,
+            events,
+            remote: false,
+            allow_send: true,
+            chords: [false; 2],
+            down: [false; 8],
+            swallowed_keys: [false; 256],
+            swallowed_buttons: [false; 5],
+            anchor: POINT::default(),
+            stopped_generation: None,
+            generation: None,
+            arm_until: Instant::now(),
+            last_pointer: POINT::default(),
+            motion: PhysicalMotion::default(),
+        }
+    }
 
     #[test]
     fn translates_physical_positions_and_distinguishes_extended_keys() {
@@ -508,23 +535,7 @@ mod tests {
     fn start_and_return_shortcuts_do_not_forward_the_function_keys() {
         let (shortcuts, state) = tokio::sync::watch::channel(Default::default());
         let (events, mut captured) = tokio::sync::mpsc::channel(4);
-        let mut hooks = super::HookState {
-            commands: tokio::sync::watch::channel(super::Command::Local).1,
-            shortcuts,
-            events,
-            remote: false,
-            allow_send: true,
-            chords: [false; 2],
-            down: [false; 8],
-            swallowed_keys: [false; 256],
-            swallowed_buttons: [false; 5],
-            anchor: Default::default(),
-            stopped_generation: None,
-            generation: None,
-            arm_until: std::time::Instant::now(),
-            last_pointer: Default::default(),
-            motion: Default::default(),
-        };
+        let mut hooks = hook_state(shortcuts, events);
         let key = |vk, scan| KBDLLHOOKSTRUCT {
             vkCode: vk,
             scanCode: scan,
@@ -540,5 +551,24 @@ mod tests {
         assert!(hooks.key(&key(u32::from(VK_F10), 0x44), false));
         assert!(captured.try_recv().is_err());
         assert!(!hooks.remote);
+    }
+
+    #[test]
+    fn an_untagged_key_release_does_not_reclaim_local_control() {
+        let (shortcuts, state) = tokio::sync::watch::channel(Default::default());
+        let (events, _) = tokio::sync::mpsc::channel(4);
+        let mut hooks = hook_state(shortcuts, events);
+        let key = KBDLLHOOKSTRUCT {
+            vkCode: 0x5b,
+            scanCode: 0x5b,
+            flags: super::LLKHF_EXTENDED,
+            ..Default::default()
+        };
+        assert!(!hooks.key(&key, false));
+        assert_eq!(state.borrow().activity, 0);
+        assert!(!hooks.key(&key, true));
+        assert_eq!(state.borrow().activity, 1);
+        assert!(!hooks.key(&key, false));
+        assert_eq!(state.borrow().activity, 1);
     }
 }
