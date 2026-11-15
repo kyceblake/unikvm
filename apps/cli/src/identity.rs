@@ -9,6 +9,7 @@ use unikvm_platform::credential;
 
 pub(super) const USAGE: &str = "Usage:
   unikvm status
+  unikvm tray
   unikvm clipboard
   unikvm identity init PATH
   unikvm identity fingerprint PATH

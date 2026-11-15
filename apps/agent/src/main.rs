@@ -1,4 +1,5 @@
 mod clipboard;
+mod desktop;
 mod input;
 mod peer;
 mod service;

@@ -97,6 +97,7 @@ pub struct PeerConfig {
     pub address: Option<SocketAddr>,
     pub certificate: PathBuf,
     pub fingerprint: String,
+    pub name: Option<String>,
 }
 
 impl Default for Config {
@@ -127,6 +128,10 @@ pub enum ConfigError {
     PeerAddressRequired,
     #[error("configure at least one trusted peer")]
     NoPeers,
+    #[error(
+        "peer names must be nonempty, at most 64 UTF-8 bytes, and contain no control characters"
+    )]
+    PeerName,
     #[error(
         "the single-peer format requires both peer_certificate and peer_fingerprint and cannot be mixed with [[network.peers]]"
     )]
@@ -187,12 +192,23 @@ impl Config {
                         address,
                         certificate,
                         fingerprint,
+                        name: None,
                     });
                 }
                 _ => return Err(ConfigError::LegacyPeer),
             }
             if network.peers.is_empty() {
                 return Err(ConfigError::NoPeers);
+            }
+            if network
+                .peers
+                .iter()
+                .filter_map(|peer| peer.name.as_deref())
+                .any(|name| {
+                    name.trim().is_empty() || name.len() > 64 || name.chars().any(char::is_control)
+                })
+            {
+                return Err(ConfigError::PeerName);
             }
             if network.listen.port() == 0
                 || network.listen.ip().is_multicast()

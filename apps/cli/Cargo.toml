@@ -18,3 +18,6 @@ unikvm-network.workspace = true
 unikvm-platform = { workspace = true, features = ["clipboard-monitor"] }
 unikvm-protocol.workspace = true
 tokio.workspace = true
+
+[build-dependencies]
+embed-manifest.workspace = true

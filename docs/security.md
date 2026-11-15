@@ -6,7 +6,7 @@ The agent exposes health and clipboard status over native local IPC. It also ser
 - Linux and macOS use a socket in a user-owned mode-0700 directory. Both endpoints compare effective user IDs using native peer credentials. A lock serializes binding, stale socket removal, and shutdown cleanup. The fallback under `/tmp` can be precreated by another local user, resulting in a startup failure. The ownership check fails closed. [Tokio peer credential implementation](https://docs.rs/tokio/latest/src/tokio/net/unix/ucred.rs.html)
 - The agent bounds each exchange by time and frame size. A stalled local client can delay other local requests for up to one exchange deadline per connection. Processes with the same user or logon rights and OS administrators are inside the local trust boundary.
 
-The clipboard monitor and approval helper run separately from the agent and use the same user-scoped IPC. The approval helper receives only a display label and size. It is launched from an executable beside the agent.
+The tray and approval helpers run separately from the agent over the same user-scoped IPC. The agent exposes only its configured paired devices to the tray. Connect, Disconnect, and Exit affect the local agent. Cancel requires the ID of a transfer that is still active, and the approval helper receives only a display label and size for its offer. The helpers are launched from an executable beside the agent.
 
 ## Manual peer trust
 

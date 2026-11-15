@@ -1,9 +1,17 @@
 # Progress
 
+## 2026-11-15 — Native tray and transfer dialogs
+
+- Replaced the standalone clipboard monitor with the Windows tray icon and macOS menu bar item. The tray shows paired computers and transfer status. Connect, Disconnect, and Exit act on the local agent.
+- File approval uses a Windows Task Dialog or macOS alert. The Windows Shell dialog and macOS progress panel show actual file byte counts. Cancel targets the current transfer through same-user IPC. The existing clipboard peer protocol and two-paste flow are compatible.
+- Windows workspace checks and 69 tests passed, along with the native Windows Shell progress probe. Checked the Windows tray startup, single instance, Connect, Disconnect, and Exit over the live agent. Removed and restored the icon with a targeted `TaskbarCreated` message. Apple Silicon and Linux strict Clippy passed as compile-time checks. The dependency audit passed.
+- Next, test the macOS menu bar, native approval, byte progress, cancel, and completed paste with both agents updated.
+
 ## 2026-11-14 — Phase 5 paste-triggered file transfers
 
 - Clipboard v6 offers file names and sizes to explicitly configured peers. A receiving device requests an offer with Ctrl+V or ⌘V and confirms it in a native prompt. Only the approving peer receives bytes. A newer local clipboard copy takes priority. Once the transfer is ready, Paste places the verified files in the selected app or folder.
 - Windows formatting, strict Clippy, build, and 65 workspace tests passed. The Windows desktop input probe and a dedicated tagged Ctrl+V regression passed. Apple Silicon and Linux strict Clippy passed as compile-time checks.
+- Copying a file exposed a local status compatibility issue in the older clipboard monitor. The agent now reports the pending offer as a waiting state to older monitors and provides the full status to the current monitor.
 - Next, update the paired Windows and Mac desktops and verify the native prompt, approval, and final paste in both directions. When a third desktop is available, verify that its clipboard and incoming byte count stay unchanged when only another device approves. [Setup and test steps](clipboard-sync.md)
 
 ## 2026-11-14 — Clipboard v5 file transfer

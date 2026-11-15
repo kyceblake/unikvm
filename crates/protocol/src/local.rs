@@ -2,10 +2,12 @@
 
 use std::io;
 
+use crate::tray;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const REQUEST: &[u8] = b"UNIKVM/1 STATUS\n";
-const CLIPBOARD: &[u8] = b"UNIKVM/1 CLIPBD\n";
+const CLIPBOARD: &[u8] = b"UNIKVM/2 CLIPBD\n";
+const LEGACY_CLIPBOARD: &[u8] = b"UNIKVM/1 CLIPBD\n";
 const OFFER: &[u8] = b"UNIKVM/1 CLPOFR\n";
 const DECIDE: &[u8] = b"UNIKVM/1 CLPDEC\n";
 const ACK: u8 = 0x06;
@@ -33,7 +35,7 @@ pub enum ClipboardPhase {
 }
 
 impl ClipboardPhase {
-    fn from_byte(byte: u8) -> io::Result<Self> {
+    pub(crate) fn from_byte(byte: u8) -> io::Result<Self> {
         match byte {
             0 => Ok(Self::Idle),
             1 => Ok(Self::Copying),
@@ -98,7 +100,20 @@ pub async fn query(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> io::Re
 pub async fn query_clipboard(
     stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
 ) -> io::Result<ClipboardStatus> {
-    stream.write_all(CLIPBOARD).await?;
+    read_clipboard_status(stream, CLIPBOARD).await
+}
+
+pub async fn query_clipboard_legacy(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+) -> io::Result<ClipboardStatus> {
+    read_clipboard_status(stream, LEGACY_CLIPBOARD).await
+}
+
+async fn read_clipboard_status(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    request: &[u8],
+) -> io::Result<ClipboardStatus> {
+    stream.write_all(request).await?;
     expect(stream, HEADER).await?;
     let mut state = [0; 3];
     stream.read_exact(&mut state).await?;
@@ -167,7 +182,7 @@ pub async fn decide(
     Ok(accepted)
 }
 
-async fn read_flag(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<bool> {
+pub(crate) async fn read_flag(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<bool> {
     match stream.read_u8().await? {
         0 => Ok(false),
         1 => Ok(true),
@@ -194,11 +209,54 @@ pub async fn respond_with_clipboard(
 }
 
 pub async fn respond_with_transfers(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    status: impl FnOnce() -> Status,
+    clipboard: impl FnOnce() -> ClipboardStatus,
+    offer: impl FnOnce(u64) -> Option<Approval>,
+    decide: impl FnOnce(ApprovalDecision) -> bool,
+) -> io::Result<()> {
+    respond_with_tray(
+        stream,
+        status,
+        clipboard,
+        offer,
+        decide,
+        tray::View::default,
+        |_| false,
+    )
+    .await
+}
+
+pub async fn query_tray(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+) -> io::Result<tray::View> {
+    stream.write_all(tray::STATUS).await?;
+    expect(stream, HEADER).await?;
+    let view = tray::read_view(stream).await?;
+    stream.write_u8(ACK).await?;
+    Ok(view)
+}
+
+pub async fn tray_command(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    command: tray::Command,
+) -> io::Result<bool> {
+    stream.write_all(tray::COMMAND).await?;
+    command.write(stream).await?;
+    expect(stream, HEADER).await?;
+    let accepted = read_flag(stream).await?;
+    stream.write_u8(ACK).await?;
+    Ok(accepted)
+}
+
+pub async fn respond_with_tray(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     status: impl FnOnce() -> Status,
     clipboard: impl FnOnce() -> ClipboardStatus,
     offer: impl FnOnce(u64) -> Option<Approval>,
     decide: impl FnOnce(ApprovalDecision) -> bool,
+    tray_view: impl FnOnce() -> tray::View,
+    tray_command: impl FnOnce(tray::Command) -> bool,
 ) -> io::Result<()> {
     let mut request = [0; REQUEST.len()];
     stream.read_exact(&mut request).await?;
@@ -235,20 +293,33 @@ pub async fn respond_with_transfers(
             stream.write_all(HEADER).await?;
             stream.write_u8(u8::from(queued)).await?;
         }
-        CLIPBOARD => {
+        CLIPBOARD | LEGACY_CLIPBOARD => {
             let state = clipboard();
+            let encode_phase = |phase| match (request.as_slice(), phase) {
+                (LEGACY_CLIPBOARD, ClipboardPhase::Offered) => ClipboardPhase::Waiting as u8,
+                (_, phase) => phase as u8,
+            };
             let mut response = [0; HEADER.len() + 3];
             response[..HEADER.len()].copy_from_slice(HEADER);
             response[HEADER.len()..].copy_from_slice(&[
                 u8::from(state.connected),
-                state.outgoing as u8,
-                state.incoming as u8,
+                encode_phase(state.outgoing),
+                encode_phase(state.incoming),
             ]);
             stream.write_all(&response).await?;
             for progress in [state.sent, state.received] {
                 stream.write_u64(progress.bytes).await?;
                 stream.write_u64(progress.total).await?;
             }
+        }
+        tray::STATUS => {
+            stream.write_all(HEADER).await?;
+            tray::write_view(&mut stream, tray_view()).await?;
+        }
+        tray::COMMAND => {
+            let command = tray::Command::read(&mut stream).await?;
+            stream.write_all(HEADER).await?;
+            stream.write_u8(u8::from(tray_command(command))).await?;
         }
         _ => {
             return Err(io::Error::new(
@@ -286,8 +357,8 @@ mod tests {
     use tokio::io::{AsyncWriteExt, duplex};
 
     use super::{
-        ClipboardPhase, ClipboardStatus, Status, query, query_clipboard, respond,
-        respond_with_clipboard,
+        ClipboardPhase, ClipboardStatus, Status, query, query_clipboard, query_clipboard_legacy,
+        respond, respond_with_clipboard,
     };
 
     #[tokio::test]
@@ -308,6 +379,33 @@ mod tests {
             ),
         );
         assert_eq!(reply.unwrap(), expected);
+        sent.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_monitor_can_read_status_while_a_file_is_offered() {
+        let (mut client, mut server) = duplex(5);
+        let offered = ClipboardStatus {
+            connected: true,
+            outgoing: ClipboardPhase::Offered,
+            incoming: ClipboardPhase::Ready,
+            ..ClipboardStatus::default()
+        };
+        let (reply, sent) = tokio::join!(
+            query_clipboard_legacy(&mut client),
+            respond_with_clipboard(
+                &mut server,
+                || panic!("unexpected status request"),
+                || offered
+            ),
+        );
+        assert_eq!(
+            reply.unwrap(),
+            ClipboardStatus {
+                outgoing: ClipboardPhase::Waiting,
+                ..offered
+            }
+        );
         sent.unwrap();
     }
 

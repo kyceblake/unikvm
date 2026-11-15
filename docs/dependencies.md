@@ -50,6 +50,8 @@ Phase 4 uses Tokio byte I/O and native clipboard adapters. Windows reuses `windo
 
 The native monitor uses the existing `windows-sys` 0.61.2 bindings for a Win32 window, standard text controls, and painting. On macOS it enables window, text, progress indicator, and timer APIs in the existing `objc2-app-kit` and `objc2-foundation` 0.3.2 bindings. These features pull in `objc2-core-foundation` 0.3.2 and resolve optional `dispatch2` 0.3.1 in the lockfile. Both declare Rust 1.71 and Zlib OR Apache-2.0 OR MIT. The CLI reads transfer status through native local IPC. [Win32 window management](https://learn.microsoft.com/en-us/windows/win32/winmsg/windows), [AppKit bindings](https://docs.rs/objc2-app-kit/0.3.2/objc2_app_kit/), [Core Foundation bindings](https://crates.io/crates/objc2-core-foundation/0.3.2), [Grand Central Dispatch bindings](https://crates.io/crates/dispatch2/0.3.1)
 
+The tray uses the existing AppKit bindings for the status item and transfer panel and `windows-sys` for the notification icon. Windows Shell progress uses Microsoft’s generated COM bindings in `windows` 0.62.2 (Rust 1.82, MIT OR Apache-2.0). The CLI embeds the Common Controls v6 manifest with `embed-manifest` 1.5.1 (Rust 1.85, MIT), which supports the Windows GNU and MSVC linkers. [Windows COM bindings](https://docs.rs/crate/windows/0.62.2/source/Cargo.toml.orig) · [Manifest embedding](https://docs.rs/embed-manifest/1.5.1/embed_manifest/)
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |

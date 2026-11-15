@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinSet, LocalSet};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use tracing::{debug, info, warn};
@@ -19,10 +19,11 @@ use unikvm_network::{PeerEndpoint, identity::Fingerprint};
 use unikvm_platform::clipboard::{
     Clipboard, PasteRequests, Snapshot, WriteOutcome, open_source, staging_directory,
 };
-use unikvm_protocol::clipboard::{self, Control, DATA, Offer, READY};
+use unikvm_protocol::clipboard::{self, Control, DATA, Layout, Offer, READY};
 use unikvm_protocol::local::{
     Approval, ApprovalDecision, ClipboardPhase as Phase, ClipboardStatus, Progress,
 };
+use unikvm_protocol::tray::{Phase as UiPhase, Transfer};
 use unikvm_transfer::{self as transfer, Prepared, Received};
 
 use super::approval::{Prompt, make_approval};
@@ -37,11 +38,25 @@ const APPLY: Duration = Duration::from_secs(30);
 
 type Job<T> = Pin<Box<dyn Future<Output = Result<T>>>>;
 
-pub struct Worker(Option<oneshot::Sender<()>>);
+pub struct Worker {
+    signal: Option<oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Worker {
+    pub async fn stop(mut self) {
+        if let Some(stop) = self.signal.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+        }
+    }
+}
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if let Some(stop) = self.0.take() {
+        if let Some(stop) = self.signal.take() {
             let _ = stop.send(());
         }
     }
@@ -53,7 +68,11 @@ pub fn start(
     status: watch::Sender<ClipboardStatus>,
     approval: watch::Sender<Option<Approval>>,
     decisions: mpsc::Receiver<ApprovalDecision>,
-    paste: Option<PasteRequests>,
+    (paste, ui, pins): (
+        Option<PasteRequests>,
+        crate::desktop::Desktop,
+        &[Fingerprint],
+    ),
 ) -> Result<Worker> {
     let endpoint = endpoint.context("clipboard sharing requires a network endpoint")?;
     let peers = config
@@ -63,14 +82,25 @@ pub fn start(
             let connections = endpoint
                 .connection(fingerprint)
                 .context("clipboard peer is not trusted")?;
-            Ok((fingerprint.device_id(), connections))
+            let name = pins
+                .iter()
+                .position(|pin| *pin == fingerprint)
+                .and_then(|index| {
+                    ui.view
+                        .borrow()
+                        .peers
+                        .get(index)
+                        .map(|peer| peer.name.clone())
+                })
+                .context("clipboard peer has no desktop status")?;
+            Ok((fingerprint.device_id(), name, connections))
         })
         .collect::<Result<Vec<_>>>()?;
     let (stop, stopped) = oneshot::channel();
     let local = endpoint.fingerprint().device_id();
     // Native clipboard reads may wait on the owning application. Keep them off
     // the input and network runtime.
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("unikvm clipboard".into())
         .spawn(move || {
             let result = (|| -> Result<()> {
@@ -94,12 +124,13 @@ pub fn start(
                     status,
                     approval,
                     paste,
+                    ui,
                     staging: RefCell::new(staging),
                     snapshot: RefCell::new(None),
                     local_sequence: Cell::new(None),
                     incoming: Cell::new(None),
                     next_token: Cell::new(0),
-                    send_slot: Semaphore::new(1),
+                    send_slot: std::sync::Arc::new(Semaphore::new(1)),
                     peer_status: RefCell::new(vec![PeerStatus::default(); peers.len()]),
                 });
                 LocalSet::new().block_on(&runtime, async {
@@ -113,7 +144,10 @@ pub fn start(
                 warn!("clipboard sync stopped");
             }
         })?;
-    Ok(Worker(Some(stop)))
+    Ok(Worker {
+        signal: Some(stop),
+        thread: Some(thread),
+    })
 }
 
 struct Desktop {
@@ -121,12 +155,13 @@ struct Desktop {
     status: watch::Sender<ClipboardStatus>,
     approval: watch::Sender<Option<Approval>>,
     paste: Option<PasteRequests>,
+    ui: crate::desktop::Desktop,
     staging: RefCell<Staging>,
     snapshot: RefCell<Option<Rc<Snapshot>>>,
     local_sequence: Cell<Option<u64>>,
     incoming: Cell<Option<u64>>,
     next_token: Cell<u64>,
-    send_slot: Semaphore,
+    send_slot: std::sync::Arc<Semaphore>,
     peer_status: RefCell<Vec<PeerStatus>>,
 }
 
@@ -143,17 +178,17 @@ struct PeerStatus {
 impl Desktop {
     async fn run(
         self: Rc<Self>,
-        peers: Vec<(DeviceId, PeerConnection)>,
+        peers: Vec<(DeviceId, String, PeerConnection)>,
         mut decisions: mpsc::Receiver<ApprovalDecision>,
         os: Rc<Clipboard>,
     ) -> Result<()> {
         self.staging.borrow_mut().reconcile(&os);
         let (routes, _) = broadcast::channel(8);
         let mut links = JoinSet::new();
-        for (index, (peer, connections)) in peers.into_iter().enumerate() {
+        for (index, (peer, name, connections)) in peers.into_iter().enumerate() {
             links.spawn_local(self.clone().run_peer(
                 index,
-                peer,
+                (peer, name),
                 connections,
                 routes.subscribe(),
                 os.clone(),
@@ -183,25 +218,28 @@ impl Desktop {
     async fn run_peer(
         self: Rc<Self>,
         index: usize,
-        peer: DeviceId,
+        peer: (DeviceId, String),
         mut connections: PeerConnection,
         mut decisions: broadcast::Receiver<ApprovalDecision>,
         os: Rc<Clipboard>,
     ) -> Result<()> {
-        let mut previous = None;
+        // Quinn's connection ID is tied to the lifetime of its allocation.
+        let mut previous: Option<quinn::Connection> = None;
         loop {
             let connection = connections
                 .wait_for(|value| {
-                    value
-                        .as_ref()
-                        .is_some_and(|conn| Some(conn.stable_id()) != previous)
+                    value.as_ref().is_some_and(|conn| {
+                        previous
+                            .as_ref()
+                            .is_none_or(|old| old.stable_id() != conn.stable_id())
+                    })
                 })
                 .await?
                 .clone()
                 .context("clipboard connection missing")?;
-            previous = Some(connection.stable_id());
+            previous = Some(connection.clone());
             if self
-                .session(index, peer, connection, &os, &mut decisions)
+                .session(index, &peer, connection, &os, &mut decisions)
                 .await
                 .is_err()
             {
@@ -222,7 +260,7 @@ impl Desktop {
     async fn session(
         self: &Rc<Self>,
         index: usize,
-        peer: DeviceId,
+        peer: &(DeviceId, String),
         connection: quinn::Connection,
         os: &Clipboard,
         decisions: &mut broadcast::Receiver<ApprovalDecision>,
@@ -233,10 +271,11 @@ impl Desktop {
         let (incoming, events) = mpsc::channel(16);
         let sequence = os.sequence()?;
         let mut link = Link {
-            revisions: Revisions::new(self.local, peer),
+            revisions: Revisions::new(self.local, peer.0),
             desktop: self.clone(),
             index,
-            peer,
+            peer: peer.0,
+            peer_name: &peer.1,
             connection,
             control,
             os,
@@ -259,7 +298,7 @@ impl Desktop {
         tokio::try_join!(
             write_controls(send, outgoing),
             read_controls(recv, incoming),
-            link.run(events, decisions)
+            link.run(events, decisions, self.ui.cancels.subscribe())
         )?;
         Ok(())
     }
@@ -410,6 +449,8 @@ struct Outgoing {
     prepared: Option<Prepared>,
     deadline: Instant,
     awaiting_request: bool,
+    transfer: Option<u64>,
+    slot: Option<OwnedSemaphorePermit>,
 }
 
 impl Outgoing {
@@ -438,12 +479,14 @@ struct Incoming {
     accepted: bool,
     prompt: Option<Prompt>,
     ready: Option<Received>,
+    transfer: Option<u64>,
 }
 
 struct Link<'a> {
     desktop: Rc<Desktop>,
     index: usize,
     peer: DeviceId,
+    peer_name: &'a str,
     os: &'a Clipboard,
     files: bool,
     connection: quinn::Connection,
@@ -454,7 +497,7 @@ struct Link<'a> {
     out: Option<Outgoing>,
     incoming: Option<Incoming>,
     newest: Option<NonZeroU64>,
-    send_job: Option<Job<()>>,
+    send_job: Option<Job<OwnedSemaphorePermit>>,
     receive_job: Option<Job<Option<Received>>>,
 }
 
@@ -463,6 +506,7 @@ impl Link<'_> {
         &mut self,
         mut events: mpsc::Receiver<Control>,
         decisions: &mut broadcast::Receiver<ApprovalDecision>,
+        mut cancels: broadcast::Receiver<u64>,
     ) -> Result<()> {
         let mut poll = interval(POLL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -480,13 +524,26 @@ impl Link<'_> {
                         self.decide(decision)?;
                     }
                 }
+                cancel = cancels.recv() => {
+                    if let Ok(id) = cancel {
+                        if self.out.as_ref().is_some_and(|item| item.transfer == Some(id)) {
+                            self.finish_ui(0, Some(id), UiPhase::Cancelled);
+                            self.withdraw(Phase::Failed)?;
+                        } else if self.incoming.as_ref().is_some_and(|item| item.transfer == Some(id)) {
+                            self.finish_ui(1, Some(id), UiPhase::Cancelled);
+                            self.finish_incoming(Phase::Failed, true)?;
+                        }
+                    }
+                }
                 stream = self.connection.accept_uni() => self.data_stream(stream?),
                 result = poll_job(&mut self.send_job) => {
                     self.send_job = None;
-                    if result.is_err() {
-                        self.withdraw(Phase::Failed)?;
-                    } else if let Some(out) = self.out.as_mut() {
-                        out.deadline = Instant::now() + APPLY + HANDSHAKE;
+                    match result {
+                        Err(_) => self.withdraw(Phase::Failed)?,
+                        Ok(slot) => if let Some(out) = self.out.as_mut() {
+                            out.slot = Some(slot);
+                            out.deadline = Instant::now() + APPLY + HANDSHAKE;
+                        }
                     }
                 }
                 result = poll_job(&mut self.receive_job) => {
@@ -543,6 +600,17 @@ impl Link<'_> {
             .update_peer(self.index, |status| status.phase = phase);
     }
 
+    fn finish_ui(&self, direction: usize, id: Option<u64>, phase: UiPhase) {
+        if let Some(id) = id {
+            self.desktop.ui.update_transfer(direction, id, |item| {
+                item.phase = phase;
+                if phase == UiPhase::Ready {
+                    item.bytes = item.total;
+                }
+            });
+        }
+    }
+
     fn tell(&self, control: Control) -> Result<()> {
         self.control
             .try_send(control)
@@ -576,12 +644,18 @@ impl Link<'_> {
                     return Ok(());
                 }
                 out.deadline = now + IN_FLIGHT;
+                let presentation = transfer_view(&prepared.layout, self.peer_name)?;
+                out.transfer = presentation.as_ref().map(|transfer| transfer.id);
                 let connection = self.connection.clone();
                 let desktop = self.desktop.clone();
                 let index = self.index;
                 self.outgoing_phase(Phase::Copying);
                 self.send_job = Some(Box::pin(async move {
-                    let _slot = desktop.send_slot.acquire().await?;
+                    let slot = desktop.send_slot.clone().acquire_owned().await?;
+                    let transfer_id = presentation.as_ref().map(|transfer| transfer.id);
+                    if let Some(transfer) = presentation {
+                        desktop.ui.transfer(0, transfer);
+                    }
                     let mut send = timeout(HANDSHAKE, connection.open_uni()).await??;
                     send.set_priority(-1)?;
                     timeout(HANDSHAKE, async {
@@ -591,10 +665,15 @@ impl Link<'_> {
                     .await??;
                     transfer::send(&mut send, prepared, |bytes| {
                         desktop.update_peer(index, |s| s.progress.bytes = bytes);
+                        if let Some(id) = transfer_id {
+                            desktop
+                                .ui
+                                .update_transfer(0, id, |transfer| transfer.bytes = bytes);
+                        }
                     })
                     .await?;
                     send.finish()?;
-                    Ok(())
+                    Ok(slot)
                 }));
                 Ok(())
             }
@@ -604,7 +683,16 @@ impl Link<'_> {
                     .as_ref()
                     .is_some_and(|item| item.id == id && item.prepared.is_none())
                 {
-                    self.out = None;
+                    let transfer = self.out.take().and_then(|item| item.transfer);
+                    self.finish_ui(
+                        0,
+                        transfer,
+                        if applied {
+                            UiPhase::Ready
+                        } else {
+                            UiPhase::Failed
+                        },
+                    );
                     self.send_job = None;
                     self.outgoing_phase(if applied { Phase::Ready } else { Phase::Failed });
                 }
@@ -660,6 +748,7 @@ impl Link<'_> {
             accepted: false,
             ready: None,
             prompt: None,
+            transfer: None,
         });
         if file {
             if let Some(paste) = &self.desktop.paste {
@@ -737,6 +826,10 @@ impl Link<'_> {
         incoming.accepted = true;
         incoming.deadline = Instant::now() + IN_FLIGHT;
         incoming.prompt = None;
+        if let Some(transfer) = transfer_view(&incoming.offer.layout, self.peer_name)? {
+            incoming.transfer = Some(transfer.id);
+            self.desktop.ui.transfer(1, transfer);
+        }
         self.desktop.approval.send_replace(None);
         self.desktop
             .status
@@ -761,6 +854,8 @@ impl Link<'_> {
         let id = incoming.offer.revision.counter;
         let layout = incoming.offer.layout.clone();
         let status = self.desktop.status.clone();
+        let ui = self.desktop.ui.clone();
+        let transfer = incoming.transfer;
         let directory = self.desktop.staging.borrow().directory.clone();
         self.receive_job = Some(Box::pin(async move {
             let mut header = [0; DATA.len()];
@@ -774,6 +869,9 @@ impl Link<'_> {
             Ok(Some(
                 transfer::receive(&mut receive, &layout, directory.as_deref(), |bytes| {
                     status.send_modify(|s| s.received.bytes = bytes);
+                    if let Some(id) = transfer {
+                        ui.update_transfer(1, id, |transfer| transfer.bytes = bytes);
+                    }
                 })
                 .await?,
             ))
@@ -837,6 +935,8 @@ impl Link<'_> {
             prepared: Some(prepared),
             deadline: Instant::now() + if file { FILE_OFFER } else { APPROVAL } + HANDSHAKE,
             awaiting_request: file,
+            transfer: None,
+            slot: None,
         });
         self.desktop.update_peer(self.index, |s| {
             s.phase = if file {
@@ -888,6 +988,15 @@ impl Link<'_> {
         if let Some(item) = self.incoming.take() {
             self.receive_job = None;
             self.desktop.end_incoming(item.token, phase);
+            self.finish_ui(
+                1,
+                item.transfer,
+                if phase == Phase::Ready {
+                    UiPhase::Ready
+                } else {
+                    UiPhase::Failed
+                },
+            );
             if notify {
                 let id = item.offer.revision.counter;
                 let reply = if item.accepted {
@@ -908,6 +1017,7 @@ impl Link<'_> {
         if let Some(item) = self.out.take() {
             self.send_job = None;
             self.outgoing_phase(phase);
+            self.finish_ui(0, item.transfer, UiPhase::Failed);
             self.tell(Control::Withdraw(item.id))?;
         }
         Ok(())
@@ -918,8 +1028,29 @@ impl Drop for Link<'_> {
     fn drop(&mut self) {
         if let Some(incoming) = &self.incoming {
             self.desktop.end_incoming(incoming.token, Phase::Failed);
+            self.finish_ui(1, incoming.transfer, UiPhase::Failed);
+        }
+        if let Some(out) = &self.out {
+            self.finish_ui(0, out.transfer, UiPhase::Failed);
         }
     }
+}
+
+fn transfer_view(layout: &Layout, peer: &str) -> Result<Option<Transfer>> {
+    let Layout::Files(files) = layout else {
+        return Ok(None);
+    };
+    let total = layout.total()?;
+    let presentation = make_approval(layout, total)?;
+    Ok(Some(Transfer {
+        id: presentation.id.max(1),
+        peer: peer.to_owned(),
+        label: presentation.label,
+        items: files.len() as u8,
+        phase: UiPhase::Copying,
+        bytes: 0,
+        total,
+    }))
 }
 
 async fn poll_job<T>(job: &mut Option<Job<T>>) -> Result<T> {
@@ -945,6 +1076,8 @@ mod tests {
                 prepared: Some(Prepared::new(Content::Files(vec![fixture]), open_source).unwrap()),
                 deadline: now + FILE_OFFER,
                 awaiting_request: true,
+                transfer: None,
+                slot: None,
             }
         };
 

@@ -24,7 +24,16 @@ fn run() -> Result<()> {
     let command = args.next();
     match command.as_deref().and_then(|arg| arg.to_str()) {
         Some("status") if args.next().is_none() => {}
-        Some("clipboard") if args.next().is_none() => return clipboard::open(),
+        Some("clipboard") if args.next().is_none() => return clipboard::open(false),
+        Some("tray") => {
+            let agent_owned = match args.next().as_deref().and_then(|value| value.to_str()) {
+                None => false,
+                Some("--agent") => true,
+                _ => bail!(USAGE),
+            };
+            anyhow::ensure!(args.next().is_none(), USAGE);
+            return clipboard::open(agent_owned);
+        }
         Some("clipboard-approval") => {
             let id = args
                 .next()

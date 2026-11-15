@@ -10,12 +10,16 @@ workspace = true
 
 [features]
 clipboard-monitor = [
+    "dep:unikvm-protocol",
+    "dep:windows",
     "objc2-app-kit/NSApplication",
     "objc2-app-kit/NSAlert",
     "objc2-app-kit/NSButton",
     "objc2-app-kit/NSColor",
     "objc2-app-kit/NSControl",
     "objc2-app-kit/NSFont",
+    "objc2-app-kit/NSEvent",
+    "objc2-app-kit/NSImage",
     "objc2-app-kit/NSGraphics",
     "objc2-app-kit/NSProgressIndicator",
     "objc2-app-kit/NSResponder",
@@ -23,6 +27,13 @@ clipboard-monitor = [
     "objc2-app-kit/NSTextField",
     "objc2-app-kit/NSView",
     "objc2-app-kit/NSWindow",
+    "objc2-app-kit/NSPanel",
+    "objc2-app-kit/NSScreen",
+    "objc2-app-kit/NSStatusBar",
+    "objc2-app-kit/NSStatusBarButton",
+    "objc2-app-kit/NSStatusItem",
+    "objc2-app-kit/NSMenu",
+    "objc2-app-kit/NSMenuItem",
     "objc2-app-kit/objc2-core-foundation",
     "objc2-foundation/NSDate",
     "objc2-foundation/NSGeometry",
@@ -33,6 +44,7 @@ clipboard-monitor = [
 [dependencies]
 tempfile.workspace = true
 tokio.workspace = true
+unikvm-protocol = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -51,6 +63,7 @@ rustix = { workspace = true, features = ["fs", "process"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 image = { workspace = true, features = ["bmp", "png"] }
 unikvm-core.workspace = true
+windows = { workspace = true, optional = true, features = ["Win32_System_Com", "Win32_UI_Shell_PropertiesSystem"] }
 windows-sys = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_Security_Authorization",
@@ -68,6 +81,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_LibraryLoader",
     "Win32_System_StationsAndDesktops",
     "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

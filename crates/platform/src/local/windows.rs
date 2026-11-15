@@ -52,6 +52,11 @@ impl Endpoint {
         Ok(Listener { pipe })
     }
 
+    #[cfg(feature = "clipboard-monitor")]
+    pub(crate) fn tray_name(&self) -> String {
+        format!("Local\\UniKVM-Tray-{}", self.logon)
+    }
+
     pub async fn connect(&self) -> io::Result<NamedPipeClient> {
         let client = loop {
             match ClientOptions::new()

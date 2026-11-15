@@ -20,14 +20,18 @@ To copy the original file, select it in Explorer or Finder and copy it. On the r
 
 The agent sends new copies made after the clipboard session starts and skips entries with supported sensitive-content markers. Remove the `[clipboard]` table and restart either agent to pause sharing.
 
-## Watch clipboard progress
+<a id="watch-clipboard-progress"></a>
 
-On either desktop, run this in a separate terminal while the agent is running.
+## Use the tray and menu bar
+
+The agent opens a Windows tray icon or macOS menu bar icon when the `unikvm` executable is beside it. Hover to see paired computers and clipboard status. Open the icon menu for the full device list, **Connect**, **Disconnect**, and **Exit completely**. Disconnect pauses this computer's shared input and clipboard until you connect again. Add an optional `name = "MacBook"` to each `[[network.peers]]` entry to give it a local display name.
+
+If you need to open the icon manually, run:
 
 ```sh
-cargo run --locked -p unikvm-cli -- clipboard
+cargo run --locked -p unikvm-cli -- tray
 ```
 
-The command opens a native desktop window with outgoing and incoming rows. It shows when a file is offered or waiting for approval and displays the number of bytes transferred. The approval prompt opens even with the monitor closed. **Ready to paste here** means the agent successfully wrote to this computer’s clipboard. The sender shows **Ready to paste on a receiving device** after it receives confirmation.
+Windows asks **Download** or **Decline** in a native dialog. macOS asks **Receive** or **Decline**. When approved, Windows uses the system file progress dialog and macOS shows a small progress panel near the top right of the screen. **Cancel** stops the transfer and clears partial data. If the copy finishes immediately, look for **Ready to paste here** in the icon menu before pasting again.
 
-Test both directions with a small file and a file over 5 MB. With the monitor closed, copy a file and verify the confirmation opens only after Ctrl+V or ⌘V. Decline and verify the receiving clipboard keeps its prior content. Repeat with **Receive**, wait for **Ready to paste here**, paste into a folder, and compare the file with the original. With multiple peers, approve on one device and verify the others stay at zero bytes. Repeat after making a newer local copy on the receiver and verify normal Paste uses that copy.
+Test both directions with a small file and a file over 5 MB. Copy a file and verify the confirmation opens only after Ctrl+V or ⌘V on the receiving computer. Decline and verify the receiving clipboard keeps its prior content. Repeat with **Download** or **Receive**, wait for **Ready to paste here**, paste into a folder, and compare the file with the original. With multiple peers, approve on one device and verify the others stay at zero bytes. Repeat after making a newer local copy on the receiver and verify normal Paste uses that copy.
