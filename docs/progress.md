@@ -8,8 +8,9 @@
 
 ## Native destination drop probe
 
+- Native Apple Silicon source probe built successfully. Both the Mac mouse and Windows mouse controlling the Mac dragged the right-edge sample into Finder; AppKit reported accepted copies. Both destination SHA-256 hashes matched the retained source. Escape ended a further drag without an accepted copy; the cancellation destination stayed empty and the source remained intact. These are local native drops, not cross-machine file drags.
 - Added `--source FILE` to start a copy-only native drag from the highlighted edge with a local sample file. The target app handles choosing the destination folder. [Drop probe instructions](platform-support.md#probe-a-native-drop-into-explorer-or-finder)
-- Windows formatting, workspace Clippy, tests, and build passed. The standalone Windows probe built and passed its Shell file-reference test. The user reported that the sample appeared in Explorer. The temporary destination was empty at follow-up, so the dropped file's bytes remain unverified. Apple Silicon strict Clippy passed as a compile-time check. The Finder destination drop and UniKVM-controlled pointer checks on both desktops are still pending.
+- Windows formatting, workspace Clippy, tests, and build passed. The standalone Windows probe built and passed its Shell file-reference test. The user reported that the sample appeared in Explorer. The temporary destination was empty at follow-up, so the dropped file's bytes remain unverified. Apple Silicon strict Clippy passed as a compile-time check. The Finder destination drop and Windows-controlled pointer checks passed as recorded above. The Mac-controlled pointer check on Windows remains pending.
 
 ## 2026-11-15 — File drag edge probe
 
@@ -59,6 +60,7 @@
 
 - The operator confirmed Windows-to-Mac image paste. Windows logged outbound images and an active clipboard v3 session, with no incoming image during the Mac-to-Windows attempts.
 - The Mac adapter now looks for supported raster data across a bounded number of pasteboard items, even when an image has accompanying text or browser metadata. It also reads JPEG representations. File copies and privacy markers remain excluded.
+- Native Apple Silicon build exposed an unavailable array iterator with the selected Foundation features. Switched to bounded indexed access and removed an unused import. Formatting, strict workspace Clippy, workspace tests/build, and both private Mac pasteboard regressions passed locally.
 - Windows formatting, strict Clippy, all 58 workspace tests, and the build passed on rerun after a transient three-peer test failure. Cargo deny passed. The Apple Silicon cross-check is still blocked by Windows access-denied errors starting the compiler.
 - After updating the Mac agent, the operator confirmed that both a Mac screenshot and Discord's Copy Image command pasted into Paint. Windows logged both images as received and applied. Discord image copy from Windows to Mac also worked.
 - Copying a JPEG file in Finder or Explorer requires Phase 5 file transfer. Open the JPEG in an app and copy the image itself to use clipboard image sync.
