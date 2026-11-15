@@ -10,8 +10,8 @@ use unikvm_core::input::{ButtonState, InputEvent, PointerButton};
 use unikvm_network::identity::Fingerprint;
 use unikvm_platform::input::{CaptureControl, EdgeLayout, InputSink, MotionPacer, Shortcut};
 use unikvm_protocol::input::{
-    self, DENY, DRAG_PREPARE, DRAG_REQUEST, EDGE_REQUEST, Frame, GRANT, HEARTBEAT_ACK, LEASE,
-    REQUEST,
+    self, DENY, DRAG_PREPARE, DRAG_REQUEST, DRAG_RETURN_GRANTED, EDGE_REQUEST, Frame, GRANT,
+    HEARTBEAT_ACK, LEASE, REQUEST, RETURN_EDGE_REQUEST,
 };
 
 use super::Focus;
@@ -31,6 +31,7 @@ pub(super) struct Options {
     pub edge: Option<EdgeLayout>,
     pub allow_locked_receive: bool,
     pub native: Option<crate::desktop::NativeDrops>,
+    pub remote_drag: Option<crate::desktop::Desktop>,
 }
 
 pub async fn run(
@@ -105,7 +106,7 @@ async fn receive(
     let mut route = None;
     let entry = match (&request, options.edge) {
         (REQUEST, _) => None,
-        (EDGE_REQUEST | DRAG_REQUEST, Some(edge)) => {
+        (EDGE_REQUEST | RETURN_EDGE_REQUEST | DRAG_REQUEST, Some(edge)) => {
             if &request == DRAG_REQUEST && options.native.is_none() {
                 deny(send).await;
                 return Ok(());
@@ -181,6 +182,16 @@ async fn receive(
         }
         None => None,
     };
+    let mut native_return = false;
+    let remote_drag = (&request == RETURN_EDGE_REQUEST)
+        .then_some(options.remote_drag.as_ref())
+        .flatten();
+    let mut returns = remote_drag.map(|desktop| ReturnSource {
+        starts: desktop.drag_starts.subscribe(),
+        offers: desktop.drag_offers.clone(),
+        session,
+        connection,
+    });
     let result = tokio::select! {
         biased;
         local = wait_local(signals, baseline) => local.map(|()| (true, None)),
@@ -192,7 +203,7 @@ async fn receive(
                 .await
                 .context("input grant timed out")??;
             info!("receiving peer input");
-            inject(&mut sink, send, recv, entry, options.edge, &mut drag).await
+            inject(&mut sink, send, recv, entry, options.edge, &mut drag, (&mut returns, &mut native_return)).await
         } => result.map(|height| (false, height)),
     };
     drop(drag);
@@ -202,7 +213,11 @@ async fn receive(
         // Hide at the completed crossing before the network write can stall or
         // the sender resumes its pointer. Failed returns must reveal it again.
         control.hide_after_edge_return(baseline);
-        let reported = report_return(send, edge_session, height).await;
+        let reported = if native_return {
+            Ok(())
+        } else {
+            report_return(send, edge_session, height).await
+        };
         if let Err(error) = reported {
             control.show_idle_cursor();
             return Err(error);
@@ -320,8 +335,10 @@ async fn inject(
     entry: Option<(EdgeLayout, u16)>,
     return_edge: Option<EdgeLayout>,
     drag: &mut Option<ReceivingDrag<'_>>,
+    (returns, native_return): (&mut Option<ReturnSource>, &mut bool),
 ) -> Result<Option<u16>> {
     let mut deadline = Instant::now() + LEASE;
+    let mut pending_return = None;
     // Reposition only after granting focus and reading the first heartbeat.
     let mut pending_entry = entry;
     let edge = entry.map(|(edge, _)| edge).or(return_edge);
@@ -345,6 +362,9 @@ async fn inject(
                 // read would lose bytes from the ordered input stream.
                 tokio::select! {
                     biased;
+                    path = wait_return_source(returns) => {
+                        pending_return = path;
+                    }
                     step = pacer.next() => {
                         let [dx, dy] = step.context("pace pointer movement")?;
                         if (dx != 0 || dy != 0)
@@ -358,7 +378,14 @@ async fn inject(
                 }
             }
         } else {
-            read.await
+            tokio::pin!(read);
+            tokio::select! {
+                result = &mut read => result,
+                path = wait_return_source(returns) => {
+                    pending_return = path;
+                    read.await
+                }
+            }
         };
 
         match frame.context("peer input lease expired")?? {
@@ -426,6 +453,17 @@ async fn inject(
                     motion = pointer_pacer(sink);
                 }
             }
+            Frame::DragReturnPrepared(_) | Frame::DragReturnReady(_) => {
+                anyhow::bail!("unexpected drag return coordination frame");
+            }
+        }
+        if let (Some(path), Some(edge), Some(source)) =
+            (pending_return.take(), edge, returns.as_ref())
+            && let Some(height) = sink.remote_drag_height(edge)
+        {
+            finish_remote_drag(sink, send, recv, path, (edge, height), source).await?;
+            *native_return = true;
+            return Ok(Some(height));
         }
         // Let the local-activity branch run even when the peer has buffered many frames.
         tokio::task::yield_now().await;
@@ -477,10 +515,147 @@ fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Resul
     Ok(())
 }
 
+struct ReturnSource {
+    starts: tokio::sync::broadcast::Receiver<std::path::PathBuf>,
+    offers: tokio::sync::broadcast::Sender<crate::desktop::OutboundDrag>,
+    session: ControlSession,
+    connection: usize,
+}
+
+async fn wait_return_source(source: &mut Option<ReturnSource>) -> Option<std::path::PathBuf> {
+    match source {
+        Some(source) => loop {
+            match source.starts.recv().await {
+                Ok(path) => return Some(path),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return std::future::pending().await,
+            }
+        },
+        None => std::future::pending().await,
+    }
+}
+
+async fn finish_remote_drag(
+    sink: &mut InputSink,
+    send: &mut quinn::SendStream,
+    recv: &mut quinn::RecvStream,
+    path: std::path::PathBuf,
+    (edge, height): (EdgeLayout, u16),
+    source: &ReturnSource,
+) -> Result<()> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut bytes = [0; 8];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("native drag return nonce unavailable"))?;
+    let nonce = std::num::NonZeroU64::new(u64::from_ne_bytes(bytes))
+        .context("native drag return nonce unavailable")?;
+    let deadline = Instant::now() + DRAG_SETUP;
+    timeout_at(deadline, send.write_all(&input::drag_return(height, nonce))).await??;
+    wait_return_stage(sink, send, recv, Frame::DragReturnPrepared(nonce), deadline).await?;
+    source
+        .offers
+        .send(crate::desktop::OutboundDrag {
+            route: crate::desktop::Drag {
+                peer: source.session.peer,
+                connection: source.connection,
+                nonce,
+            },
+            path,
+        })
+        .map_err(|_| anyhow::anyhow!("file sharing unavailable during native drag return"))?;
+    wait_return_stage(sink, send, recv, Frame::DragReturnReady(nonce), deadline).await?;
+    ensure!(
+        sink.remote_drag_height(edge).is_some(),
+        "remote drag left the edge during setup"
+    );
+    sink.cancel_remote_drag()?;
+    timeout_at(deadline, send.write_all(&[DRAG_RETURN_GRANTED])).await??;
+    info!("native drag returned to physical mouse owner");
+    Ok(())
+}
+
+async fn wait_return_stage(
+    sink: &mut InputSink,
+    send: &mut (impl AsyncWrite + Unpin),
+    recv: &mut (impl tokio::io::AsyncRead + Unpin),
+    expected: Frame,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let frame = timeout_at(deadline, input::read(recv))
+            .await
+            .context("native drag return setup timed out")??;
+        if return_stage_ready(frame, expected)? {
+            ensure!(
+                sink.check_permission(),
+                "remote drag posting permission lost"
+            );
+            return Ok(());
+        }
+        match frame {
+            Frame::Heartbeat(token) => {
+                ensure!(
+                    sink.check_permission(),
+                    "remote drag posting permission lost"
+                );
+                timeout_at(deadline, send.write_all(&[HEARTBEAT_ACK + token])).await??;
+            }
+            Frame::Event(event @ InputEvent::PointerMove { .. }) => sink.send(event)?,
+            Frame::Event(event) => {
+                sink.send(event)?;
+                anyhow::bail!("remote drag changed during return setup");
+            }
+            _ => anyhow::bail!("remote drag return cancelled or mismatched"),
+        }
+    }
+}
+
+fn return_stage_ready(frame: Frame, expected: Frame) -> Result<bool> {
+    if frame == expected {
+        return Ok(true);
+    }
+    ensure!(
+        matches!(
+            frame,
+            Frame::Heartbeat(_) | Frame::Event(InputEvent::PointerMove { .. })
+        ),
+        "remote drag return cancelled or mismatched"
+    );
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, duplex};
+
+    #[test]
+    fn return_setup_is_nonce_bound_and_release_or_escape_cancels() {
+        let nonce = std::num::NonZeroU64::new(7).unwrap();
+        let expected = Frame::DragReturnReady(nonce);
+        assert!(return_stage_ready(expected, expected).unwrap());
+        assert!(!return_stage_ready(Frame::Heartbeat(0), expected).unwrap());
+        assert!(
+            !return_stage_ready(
+                Frame::Event(InputEvent::PointerMove { dx: 2, dy: 1 }),
+                expected
+            )
+            .unwrap()
+        );
+        for frame in [
+            Frame::DragReturnReady(std::num::NonZeroU64::new(8).unwrap()),
+            Frame::DragReturnPrepared(nonce),
+            Frame::Release,
+            Frame::Event(DRAG_BUTTON_UP),
+            Frame::Event(InputEvent::Key {
+                usage: unikvm_core::input::KeyUsage(0x29),
+                state: ButtonState::Pressed,
+            }),
+        ] {
+            assert!(return_stage_ready(frame, expected).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn shortcut_return_uses_eof_instead_of_an_unexpected_edge_frame() {

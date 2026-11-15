@@ -67,6 +67,7 @@ impl Control {
             let route = send::DragSender {
                 starts: desktop.drag_starts.subscribe(),
                 offers: desktop.drag_offers.clone(),
+                returns: (cfg!(windows)).then(|| desktop.file_drop.clone()),
             };
             let side = match edge.side {
                 Edge::Left => "--left",
@@ -117,6 +118,7 @@ impl Control {
                         edge: None,
                         allow_locked_receive: self.allow_locked_receive,
                         native: None,
+                        remote_drag: None,
                     },
                 )
                 .await
@@ -126,7 +128,7 @@ impl Control {
                 let signals = capture.shortcuts.clone();
                 tokio::select! {
                     result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, (edge.map(|edge| edge.side), local_drag)) => result,
-                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive, native }) => result,
+                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive, native, remote_drag: (cfg!(target_os = "macos") && self.file_drag).then_some(desktop) }) => result,
                 }
             }
         }

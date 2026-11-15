@@ -476,6 +476,7 @@ impl TapState {
 
     fn update(&mut self, command: Command) {
         match command {
+            Command::ReturnDrag { height } => self.return_locally(Some(height)),
             Command::Local { return_height } => self.return_locally(return_height),
             Command::Remote {
                 generation,
@@ -912,7 +913,7 @@ pub(super) fn drag_height(side: Edge) -> Option<u16> {
         .crossing(point, dx, 0)
 }
 
-fn cancel_native_drag() -> Result<(), ()> {
+pub(super) fn cancel_native_drag() -> Result<(), ()> {
     if !MacInputSink::has_permission() {
         return Err(());
     }

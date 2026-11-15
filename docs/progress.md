@@ -1,5 +1,10 @@
 # Progress
 
+## Windows mouse returning a Finder drag
+
+- Added a separate return handoff for a Windows mouse controlling Finder on the Mac. It uses the existing receiving input session and a nonce-bound file offer, rather than treating injected events as physical Mac input. Windows arms its helper before Mac cancels Finder's drag, then restores local pointer ownership and the suppressed primary hold on its hook thread. The native release and approval still gate file delivery.
+- Added protocol, nonce/stage cancellation, pending-offer cleanup, and local activation/release regressions. Mac workspace tests, build, and strict Clippy passed. Windows platform and exact CLI drop-helper module passed cross-target strict Clippy; a full Windows CLI cross-build on this Mac is blocked by missing Windows SDK C headers for ring. These are compile-time checks; the paired Windows-mouse drag and cancellation tests remain pending. See the [return-drag test](platform-support.md#return-a-finder-drag-using-the-windows-mouse).
+
 ## Explorer as a native drag source
 
 - The Windows desktop helper observes a single Explorer file at the configured display edge. The agent leaves the drag in Explorer until a pinned peer grants the handoff. It then ends the local drag and captures pointer movement and the physical button release. [Windows source checks](platform-support.md#probe-file-drags-at-the-screen-edge)

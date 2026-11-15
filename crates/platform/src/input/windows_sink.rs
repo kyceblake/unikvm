@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 
 use super::windows::{check_input_desktop, key_usage, physical_input_held};
 
-pub(super) const EVENT_TAG: usize = 0x554b564d;
+pub(crate) const EVENT_TAG: usize = 0x554b564d;
 const BUTTONS: [PointerButton; 5] = [
     PointerButton::Primary,
     PointerButton::Secondary,
@@ -29,6 +29,16 @@ pub struct WindowsInputSink {
 }
 
 impl WindowsInputSink {
+    pub fn remote_drag_height(&self, _: EdgeLayout) -> Option<u16> {
+        None
+    }
+
+    pub fn cancel_remote_drag(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "remote drag return requires a Mac receiver",
+        ))
+    }
     pub fn enter_edge(&mut self, edge: EdgeLayout, height: u16) -> io::Result<()> {
         edge.place(height)?;
         Ok(())
@@ -231,6 +241,10 @@ pub(super) fn cancel_file_drag() -> io::Result<()> {
         return Err(io::Error::other("could not cancel the local Explorer drag"));
     }
     Ok(())
+}
+
+pub(super) fn restore_primary_drag() -> io::Result<()> {
+    inject(mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0, 0))
 }
 
 fn inject(input: INPUT) -> io::Result<()> {

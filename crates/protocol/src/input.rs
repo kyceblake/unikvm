@@ -10,6 +10,7 @@ use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 pub const REQUEST: &[u8; 8] = b"INPUT/1\n";
 pub const EDGE_REQUEST: &[u8; 8] = b"EDGE/1\r\n";
+pub const RETURN_EDGE_REQUEST: &[u8; 8] = b"EDGE/2\r\n";
 pub const DRAG_REQUEST: &[u8; 8] = b"DRAG/1\r\n";
 pub const DRAG_PREPARE: u8 = 254;
 pub const GRANT: u8 = 1;
@@ -17,6 +18,8 @@ pub const DENY: u8 = 0;
 pub const HEARTBEAT_ACK: u8 = 2;
 pub const HEARTBEAT_TOKENS: u8 = 250;
 pub const EDGE_RETURN: u8 = HEARTBEAT_ACK + HEARTBEAT_TOKENS;
+pub const DRAG_RETURN: u8 = 253;
+pub const DRAG_RETURN_GRANTED: u8 = 255;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(250);
 pub const LEASE: Duration = Duration::from_millis(1250);
 
@@ -38,6 +41,21 @@ pub fn edge_start(side: Edge, height: u16) -> [u8; 20] {
     let mut packet = [0; 20];
     packet[..11].copy_from_slice(&edge_packet(side, height));
     packet[11..].copy_from_slice(&encode(Frame::Heartbeat(0)));
+    packet
+}
+
+/// Opt in to receiving a file drag when this pointer returns to its owner.
+pub fn return_edge_start(side: Edge, height: u16) -> [u8; 20] {
+    let mut packet = edge_start(side, height);
+    packet[..8].copy_from_slice(RETURN_EDGE_REQUEST);
+    packet
+}
+
+pub fn drag_return(height: u16, nonce: NonZeroU64) -> [u8; 11] {
+    let mut packet = [0; 11];
+    packet[0] = DRAG_RETURN;
+    packet[1..3].copy_from_slice(&height.to_be_bytes());
+    packet[3..].copy_from_slice(&nonce.get().to_be_bytes());
     packet
 }
 
@@ -68,6 +86,8 @@ pub enum Frame {
     Heartbeat(u8),
     Release,
     Event(InputEvent),
+    DragReturnPrepared(NonZeroU64),
+    DragReturnReady(NonZeroU64),
 }
 
 pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Frame> {
@@ -115,6 +135,15 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Frame> {
                 }
             })
         }
+        tag @ (6 | 7) => {
+            let nonce = NonZeroU64::new(u64::from_be_bytes(bytes[1..].try_into().unwrap()))
+                .ok_or_else(invalid)?;
+            if tag == 6 {
+                Frame::DragReturnPrepared(nonce)
+            } else {
+                Frame::DragReturnReady(nonce)
+            }
+        }
         _ => return Err(invalid()),
     };
     Ok(frame)
@@ -158,6 +187,14 @@ fn encode(frame: Frame) -> [u8; 9] {
             bytes[1..5].copy_from_slice(&dx.to_be_bytes());
             bytes[5..9].copy_from_slice(&dy.to_be_bytes());
         }
+        Frame::DragReturnPrepared(nonce) | Frame::DragReturnReady(nonce) => {
+            bytes[0] = if matches!(frame, Frame::DragReturnPrepared(_)) {
+                6
+            } else {
+                7
+            };
+            bytes[1..].copy_from_slice(&nonce.get().to_be_bytes());
+        }
     }
     bytes
 }
@@ -177,11 +214,14 @@ fn invalid() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::{Frame, read, write};
+    use std::num::NonZeroU64;
     use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
     #[tokio::test]
     async fn round_trips_fixed_frames_and_rejects_invalid_input() {
         for frame in [
+            Frame::DragReturnPrepared(NonZeroU64::new(0x1234).unwrap()),
+            Frame::DragReturnReady(NonZeroU64::new(u64::MAX).unwrap()),
             Frame::Heartbeat(7),
             Frame::Release,
             Frame::Event(InputEvent::Key {
@@ -208,6 +248,8 @@ mod tests {
             [2, 0, 4, 2, 0, 0, 0, 0, 0],
             [3, 5, 1, 0, 0, 0, 0, 0, 0],
             [4, 127, 0, 0, 0, 0, 0, 0, 0],
+            [6, 0, 0, 0, 0, 0, 0, 0, 0],
+            [7, 0, 0, 0, 0, 0, 0, 0, 0],
         ] {
             assert_eq!(
                 read(&mut invalid.as_slice()).await.unwrap_err().kind(),
@@ -243,4 +285,15 @@ async fn edge_start_appends_a_heartbeat_to_the_existing_request() {
     assert_eq!(request, edge_packet(Edge::Right, 0x7654));
     assert_eq!(read(&mut frames).await.unwrap(), Frame::Heartbeat(0));
     assert!(frames.is_empty());
+
+    let capable = return_edge_start(Edge::Left, 0x7654);
+    assert_eq!(&capable[..8], RETURN_EDGE_REQUEST);
+    assert_eq!(&capable[8..], &edge_start(Edge::Left, 0x7654)[8..]);
+    let returned = drag_return(0x1234, NonZeroU64::new(0x123456789abcdef).unwrap());
+    assert_eq!(returned[0], DRAG_RETURN);
+    assert_eq!(&returned[1..3], &[0x12, 0x34]);
+    assert_eq!(
+        u64::from_be_bytes(returned[3..].try_into().unwrap()),
+        0x123456789abcdef
+    );
 }

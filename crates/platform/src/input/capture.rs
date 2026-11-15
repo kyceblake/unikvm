@@ -88,10 +88,17 @@ pub struct Shortcut {
     pub drag_epoch: u64,
     /// Changes without recording the content of local activity.
     pub activity: u64,
+    /// Physical primary-only hold, tracked before native events are suppressed.
+    pub primary_drag: bool,
+    /// Native monitor restored the local pointer and its primary hold.
+    pub local_drag_ready: bool,
 }
 
 #[derive(Clone, Copy)]
 pub(super) enum Command {
+    ReturnDrag {
+        height: u16,
+    },
     Local {
         return_height: Option<u16>,
     },
@@ -202,6 +209,37 @@ impl Capture {
         return super::macos_capture::drag_height(side);
         #[cfg(target_os = "windows")]
         return super::windows::drag_height(EdgeLayout::primary(side).ok()?);
+    }
+
+    pub fn drag_return_ready(&self, _side: unikvm_core::geometry::Edge) -> bool {
+        #[cfg(target_os = "windows")]
+        return self.shortcuts.borrow().primary_drag
+            && super::windows::check_input_desktop().is_ok();
+        #[cfg(target_os = "macos")]
+        false
+    }
+
+    pub fn return_drag(&self, height: u16) {
+        self.control
+            .commands
+            .send_replace(Command::ReturnDrag { height });
+        (self.control.wake)();
+    }
+
+    pub async fn wait_local(&mut self, deadline: Instant) -> io::Result<()> {
+        tokio::time::timeout_at(
+            deadline.into(),
+            self.shortcuts.wait_for(|state| state.local_drag_ready),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "local pointer restoration timed out",
+            )
+        })?
+        .map(|_| ())
+        .map_err(io::Error::other)
     }
 
     fn renew_capture(&self, generation: u64, expires: Instant, edge: bool, drag: Option<u64>) {

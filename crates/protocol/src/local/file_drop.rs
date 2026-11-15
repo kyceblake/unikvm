@@ -27,6 +27,8 @@ pub enum Command {
     Start { path: String, observed_ms: u64 },
     ForDrag(u64),
     Armed(u64),
+    AwaitLocal(u64),
+    Released(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,12 +56,16 @@ pub async fn exchange(
         | Command::Poll(id)
         | Command::Finish { id, .. }
         | Command::ForDrag(id)
-        | Command::Armed(id) => {
+        | Command::Armed(id)
+        | Command::AwaitLocal(id)
+        | Command::Released(id) => {
             let tag = match command {
                 Command::Begin(_) => 1,
                 Command::Poll(_) => 2,
                 Command::ForDrag(_) => 5,
                 Command::Armed(_) => 6,
+                Command::AwaitLocal(_) => 7,
+                Command::Released(_) => 8,
                 _ => 3,
             };
             stream.write_u8(tag).await?;
@@ -109,6 +115,8 @@ impl Command {
             },
             5 => Self::ForDrag(read_id(stream).await?),
             6 => Self::Armed(read_id(stream).await?),
+            7 => Self::AwaitLocal(read_id(stream).await?),
+            8 => Self::Released(read_id(stream).await?),
             _ => return Err(invalid()),
         })
     }
@@ -195,6 +203,8 @@ mod tests {
                 Reply::Recorded,
             ),
             (Command::Armed(42), Reply::Recorded),
+            (Command::AwaitLocal(42), Reply::Pending),
+            (Command::Released(42), Reply::Recorded),
             (
                 Command::Poll(42),
                 Reply::Ready("C:\\staging\\sample.txt".into()),

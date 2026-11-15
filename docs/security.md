@@ -1,5 +1,7 @@
 # Security
 
+Windows-owned mouse return drags require an opted-in input/file peer and an `EDGE/2` session. The return's fresh nonce binds metadata to that peer and connection. Native helper activation occurs only after the Mac ends its injected drag and Windows restores local pointer ownership. Only an activated local-return helper can record native release; normal forwarded drags retain their separate release gate. Timeout, Escape, a changed button/key state, or a mismatched coordination frame cancels setup. No file bytes are requested until native drop and receiver approval.
+
 The agent exposes health and clipboard status over native local IPC. It also serves pending offer details and accepts approval decisions through the same authenticated connection. Decisions are bound to a random local identifier for the current offer.
 
 - Windows names its pipe using the logon SID, sets an explicit DACL for that SID, and rejects remote clients. The CLI opens the pipe at identification-only impersonation level and checks that the pipe owner matches its user SID before sending a request. First-instance creation prevents concurrent agents on the same endpoint. Other accounts guessing and precreating a pipe name can cause denial of service. The owner check rejects a forged response from such an account. [Microsoft named pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights)

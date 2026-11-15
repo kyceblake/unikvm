@@ -92,6 +92,12 @@ Open an empty Explorer folder on Windows. Drag one regular file in Finder with t
 
 Repeat with Escape before release and with **Decline** after release. Neither should create a destination file. Check that ordinary edge switching still works afterward. The preview supports Finder to Explorer, one regular file per drag, and the existing 50 MB limit. It requires an unlocked desktop and a free primary display edge. Restart the Mac helper after changing its display arrangement. [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard) · [Windows OLE drag loop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-dodragdrop)
 
+### Return a Finder drag using the Windows mouse
+
+Update and build both desktops, retaining `input.file_drag = true` and clipboard file sharing on both. Using the Windows mouse, enter the Mac without holding a button. Start dragging one regular file in Finder, hold the primary button through the Mac's right edge, then drop into an empty Explorer folder. Approve **Download** and compare the destination SHA-256 with the retained source. Repeat with Escape before release and Decline after release. Check normal pointer movement and primary clicks afterward, including cancellation during the edge handoff.
+
+The Windows sender advertises return support with `EDGE/2`; an older Mac rejects that input request, so both agents must be updated. The return binds the file offer to the live peer connection and a fresh nonce. Mac keeps receiving input until Windows arms its native helper, then ends Finder's injected drag. Windows restores the physical primary-button hold on its capture thread and lets its real release reach OLE. File bytes remain gated by native release and receiver approval. This path is implemented and compile-checked; the Windows native gesture still requires verification.
+
 ## Run the Windows probe
 
 Run these from an interactive desktop with a harmless foreground window. The probe sends a paired F24 press/release and a one-unit relative pointer move, checks tagged hook delivery and suppression, and restores the starting pointer position. It collects counts without recording key identities.

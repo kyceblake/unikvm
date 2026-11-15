@@ -202,6 +202,25 @@ pub(super) fn run_hooks(
                     }
                 }
                 Command::Local { return_height } => state.local(return_height),
+                Command::ReturnDrag { height } => {
+                    if state.remote {
+                        if state.shortcuts.borrow().primary_drag {
+                            state.local(Some(height));
+                            // Restore the suppressed down on the hook owner thread.
+                            // Queued physical up events run afterward and reach OLE.
+                            state.swallowed_buttons[0] = false;
+                            if super::windows_sink::restore_primary_drag().is_ok() {
+                                state
+                                    .shortcuts
+                                    .send_modify(|signal| signal.local_drag_ready = true);
+                            } else {
+                                state.emergency();
+                            }
+                        } else {
+                            state.emergency();
+                        }
+                    }
+                }
                 Command::Remote { .. } | Command::HideAfterEdgeReturn { .. } => {}
             }
         });
@@ -264,6 +283,9 @@ impl HookState {
         self.cursor = Some(cursor);
         self.raw_motion = edge;
         self.remote = true;
+        self.shortcuts.send_modify(|signal| {
+            signal.local_drag_ready = false;
+        });
     }
 
     fn begin_file_drag(&mut self, generation: u64, epoch: u64) {
@@ -369,6 +391,7 @@ impl HookState {
             })
         {
             self.swallowed_keys[index] = pressed;
+            self.publish_primary_drag();
             return true;
         }
         if !pressed && self.swallowed_keys[index] {
@@ -474,6 +497,7 @@ impl HookState {
         };
         if let Some((button, index, pressed)) = mapped {
             self.pointer_buttons[index] = pressed;
+            self.publish_primary_drag();
             if !self.remote {
                 drag_input(&self.shortcuts);
             }
@@ -528,6 +552,18 @@ impl HookState {
             edge.rearm();
         }
         self.cursor = None;
+    }
+
+    fn publish_primary_drag(&self) {
+        let held = self.pointer_buttons[0]
+            && !self.pointer_buttons[1..].contains(&true)
+            && !self.down.contains(&true)
+            && !self.swallowed_keys.contains(&true);
+        self.shortcuts.send_if_modified(|signal| {
+            let changed = signal.primary_drag != held;
+            signal.primary_drag = held;
+            changed
+        });
     }
 }
 

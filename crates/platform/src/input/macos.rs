@@ -79,6 +79,35 @@ impl MacInputSink {
         Ok(height)
     }
 
+    /// Only this sink's authenticated injected primary hold can return a drag.
+    pub fn remote_drag_height(&self, edge: EdgeLayout) -> Option<u16> {
+        if !self.buttons[0]
+            || self.buttons[1..].contains(&true)
+            || self.keys.contains(&true)
+            || self.is_locked_receiver()
+            || !self.check_permission()
+            || super::macos_capture::physical_input_held()
+        {
+            return None;
+        }
+        let dx = match edge.side {
+            unikvm_core::geometry::Edge::Left => -4,
+            unikvm_core::geometry::Edge::Right => 4,
+            _ => return None,
+        };
+        edge.crossing(super::macos_edge::position().ok()?, dx, 0)
+    }
+
+    pub fn cancel_remote_drag(&mut self) -> io::Result<()> {
+        self.check_access()?;
+        if self.is_locked_receiver() || super::macos_capture::physical_input_held() {
+            return Err(io::Error::other("remote drag is no longer eligible"));
+        }
+        super::macos_capture::cancel_native_drag()
+            .map_err(|()| io::Error::other("could not cancel Finder's remote drag"))?;
+        self.release_all()
+    }
+
     /// Queries the current process's permission without showing a prompt.
     pub fn has_permission() -> bool {
         // SAFETY: This queries the WindowServer's posting permission for the current process.

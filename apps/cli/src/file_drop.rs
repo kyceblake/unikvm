@@ -16,7 +16,7 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 use unikvm_core::geometry::Edge;
 #[cfg(target_os = "windows")]
-use unikvm_platform::file_drop::run_received;
+use unikvm_platform::file_drop::{run_received, run_received_return};
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
 use unikvm_protocol::local::file_drop::{Command, Reply, exchange};
 
@@ -40,9 +40,11 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         Some(edge) if edge == "--right" => Edge::Right,
         _ => bail!("usage: unikvm drag-receive [--left | --right]"),
     };
-    let granted = match args.next().as_deref() {
+    let mode = args.next();
+    let returned = mode.as_deref().is_some_and(|flag| flag == "--returned");
+    let granted = match mode.as_deref() {
         None => None,
-        Some(flag) if flag == "--granted" => Some(
+        Some(flag) if flag == "--granted" || flag == "--returned" => Some(
             args.next()
                 .and_then(|id| id.to_str()?.parse::<u64>().ok())
                 .filter(|id| *id != 0)
@@ -76,9 +78,31 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         {
             return Err(io::Error::other("the native drop is no longer active"));
         }
+        if returned {
+            runtime
+                .block_on(async {
+                    timeout(Duration::from_secs(5), async {
+                        loop {
+                            match request(Command::AwaitLocal(id)).await? {
+                                Reply::Recorded => return Ok::<_, anyhow::Error>(()),
+                                Reply::Pending => sleep(Duration::from_millis(15)).await,
+                                _ => bail!("the returned drag is no longer active"),
+                            }
+                        }
+                    })
+                    .await
+                    .context("returned drag activation timed out")?
+                })
+                .map_err(io::Error::other)?;
+        }
         Ok(())
     };
-    let result = run_received(
+    let run = if returned {
+        run_received_return
+    } else {
+        run_received
+    };
+    let result = run(
         edge,
         &offer.file.name,
         offer.file.size,
@@ -91,7 +115,7 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
                     return Ok(path.clone());
                 }
                 runtime
-                    .block_on(receive_path(id, &mut delivery))
+                    .block_on(receive_path(id, returned, &mut delivery))
                     .map_err(io::Error::other)
             }
         },
@@ -116,8 +140,14 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-async fn receive_path(id: u64, delivery: &mut Delivery) -> Result<PathBuf> {
+async fn receive_path(id: u64, returned: bool, delivery: &mut Delivery) -> Result<PathBuf> {
     if !delivery.requested {
+        if returned {
+            anyhow::ensure!(
+                request(Command::Released(id)).await? == Reply::Recorded,
+                "the returned drag was not released after activation"
+            );
+        }
         anyhow::ensure!(
             request(Command::Begin(id)).await? == Reply::Pending,
             "the file offer is no longer available"

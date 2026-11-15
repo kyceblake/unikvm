@@ -8,6 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 mod deferred;
@@ -36,6 +37,9 @@ use windows_sys::{
         System::{LibraryLoader::GetModuleHandleW, Ole::CF_HDROP},
         UI::{
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
+            Input::KeyboardAndMouse::{
+                INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput,
+            },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
                 GetSystemMetrics, LWA_ALPHA, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN,
@@ -137,15 +141,22 @@ fn references(object: &IDataObject) -> Option<Vec<PathBuf>> {
 }
 
 #[implement(IDropSource)]
-struct FileSource(Arc<AtomicBool>);
+struct FileSource {
+    released: Arc<AtomicBool>,
+    deadline: Option<Instant>,
+}
 
 #[allow(non_snake_case)]
 impl IDropSource_Impl for FileSource_Impl {
     fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
-        if escape.as_bool() {
+        if escape.as_bool()
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             DRAGDROP_S_CANCEL
         } else if !keys.contains(MK_LBUTTON) {
-            self.0.store(true, Ordering::Release);
+            self.released.store(true, Ordering::Release);
             DRAGDROP_S_DROP
         } else {
             S_OK
@@ -175,7 +186,7 @@ pub(crate) fn run_probe(edge: Edge, source: Option<Source<'_>>) -> io::Result<()
         Some(Source::Deferred(path)) => Some(deferred::file_object(path, released.clone())?),
         None => None,
     };
-    let copied = run_edge(edge, object, released, || Ok(()))?;
+    let copied = run_edge(edge, object, released, false, || Ok(()))?;
     if let Some(copied) = copied {
         drag_probe::report_drop(copied);
     }
@@ -193,7 +204,50 @@ pub fn run_received(
     let _ole = Apartment::new()?;
     let released = Arc::new(AtomicBool::new(false));
     let object = deferred::received_object(name, size, released.clone(), verified_path)?;
-    run_edge(edge, Some(object), released, ready).map(|copied| copied.unwrap_or(false))
+    run_edge(edge, Some(object), released, false, ready).map(|copied| copied.unwrap_or(false))
+}
+
+/// Resume a remote Finder drag with this desktop's physical mouse.
+/// The caller restores capture and posts the tagged down before authorizing readiness.
+pub fn run_received_return(
+    edge: Edge,
+    name: &str,
+    size: u64,
+    verified_path: impl Fn() -> io::Result<PathBuf> + Send + Sync + 'static,
+    ready: impl FnOnce() -> io::Result<()>,
+) -> io::Result<bool> {
+    let _ole = Apartment::new()?;
+    let released = Arc::new(AtomicBool::new(false));
+    let object = deferred::received_object(name, size, released.clone(), verified_path)?;
+    run_edge(edge, Some(object), released, true, ready).map(|copied| copied.unwrap_or(false))
+}
+
+struct ReturnedButton(Arc<AtomicBool>);
+
+impl Drop for ReturnedButton {
+    fn drop(&mut self) {
+        if !self.0.load(Ordering::Acquire) {
+            let _ = returned_button(MOUSEEVENTF_LEFTUP);
+        }
+    }
+}
+
+fn returned_button(flags: u32) -> io::Result<()> {
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dwFlags: flags,
+                dwExtraInfo: crate::input::EVENT_TAG,
+                ..Default::default()
+            },
+        },
+    };
+    // SAFETY: INPUT is fully initialized; its tag bypasses UniKVM's capture hook.
+    if unsafe { SendInput(1, &input, size_of::<INPUT>() as i32) } != 1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Observe a one-file Explorer drag without accepting the local drop.
@@ -239,6 +293,7 @@ fn run_edge(
     edge: Edge,
     object: Option<IDataObject>,
     released: Arc<AtomicBool>,
+    local_return: bool,
     ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Option<bool>> {
     // SAFETY: This thread owns the window, registration and message queue.
@@ -267,6 +322,9 @@ fn run_edge(
             );
         }
         ShowWindow(window.0, SW_SHOWNOACTIVATE);
+        // The capture owner posts the tagged down while restoring local input.
+        // Balance it even if activation fails, the drag is cancelled, or OLE errors.
+        let _returned_button = local_return.then(|| ReturnedButton(released.clone()));
         ready()?;
         let mut event = MSG::default();
         loop {
@@ -276,7 +334,12 @@ fn run_edge(
                 _ if event.hwnd == window.0 && event.message == WM_TIMER => return Ok(None),
                 _ if event.hwnd == window.0 && event.message == WM_LBUTTONDOWN => {
                     if let Some(object) = &object {
-                        let source: IDropSource = FileSource(released).into();
+                        let source: IDropSource = FileSource {
+                            released,
+                            deadline: local_return
+                                .then(|| Instant::now() + Duration::from_secs(45)),
+                        }
+                        .into();
                         let mut effect = DROPEFFECT_NONE;
                         let result = DoDragDrop(object, &source, DROPEFFECT_COPY, &mut effect);
                         result.ok().map_err(io::Error::other)?;

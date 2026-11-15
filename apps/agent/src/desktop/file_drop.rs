@@ -12,6 +12,7 @@ pub(crate) struct NativeDrops(Arc<Mutex<Slots>>);
 struct Slots {
     drop: Option<Drop>,
     expected: Option<Drag>,
+    return_expected: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -26,6 +27,8 @@ struct Automatic {
     drag: Drag,
     armed: bool,
     released: bool,
+    local_return: bool,
+    activated: bool,
 }
 
 struct Drop {
@@ -57,11 +60,20 @@ impl NativeDrops {
     }
 
     pub fn reserve(&self, drag: Drag) -> bool {
+        self.reserve_mode(drag, false)
+    }
+
+    pub fn reserve_return(&self, drag: Drag) -> bool {
+        self.reserve_mode(drag, true)
+    }
+
+    fn reserve_mode(&self, drag: Drag, local_return: bool) -> bool {
         let mut slots = self.0.lock().unwrap();
         if slots.expected.is_some() {
             return false;
         }
         slots.expected = Some(drag);
+        slots.return_expected = local_return;
         true
     }
 
@@ -73,6 +85,7 @@ impl NativeDrops {
         let mut slots = self.0.lock().unwrap();
         if slots.expected == Some(drag) {
             slots.expected = None;
+            slots.return_expected = false;
         }
         if !delivered_release
             && let Some(drop) = slots
@@ -89,6 +102,7 @@ impl NativeDrops {
         if slots.expected != Some(drag) {
             return false;
         }
+        let local_return = slots.return_expected;
         slots.drop = Some(Drop {
             token,
             offer,
@@ -98,6 +112,8 @@ impl NativeDrops {
                 drag,
                 armed: false,
                 released: false,
+                local_return,
+                activated: false,
             }),
         });
         true
@@ -125,12 +141,30 @@ impl NativeDrops {
             .as_mut()
             .filter(|drop| drop.offer.id == id && drop.state == State::Offered)
             .and_then(|drop| drop.automatic.as_mut())
-            .filter(|auto| auto.armed)
+            .filter(|auto| auto.armed && !auto.local_return)
         {
             auto.released = true;
             return true;
         }
         false
+    }
+
+    /// Enable the locally owned drag only after remote cancellation and capture release.
+    pub fn activate(&self, id: u64) -> bool {
+        let mut slots = self.0.lock().unwrap();
+        let Some(auto) = slots
+            .drop
+            .as_mut()
+            .filter(|drop| {
+                drop.offer.id == id && drop.state == State::Offered && drop.expires > Instant::now()
+            })
+            .and_then(|drop| drop.automatic.as_mut())
+            .filter(|auto| auto.local_return && auto.armed)
+        else {
+            return false;
+        };
+        auto.activated = true;
+        true
     }
 
     pub fn command(&self, command: Command) -> Reply {
@@ -160,6 +194,32 @@ impl NativeDrops {
                     Reply::Recorded
                 } else {
                     Reply::Unavailable
+                }
+            }
+            Command::AwaitLocal(id)
+                if drop.offer.id == id
+                    && drop.state == State::Offered
+                    && drop.expires > Instant::now() =>
+            {
+                match drop.automatic {
+                    Some(auto) if auto.local_return && auto.armed && auto.activated => {
+                        Reply::Recorded
+                    }
+                    Some(auto) if auto.local_return && auto.armed => Reply::Pending,
+                    _ => Reply::Unavailable,
+                }
+            }
+            Command::Released(id)
+                if drop.offer.id == id
+                    && drop.state == State::Offered
+                    && drop.expires > Instant::now() =>
+            {
+                match drop.automatic.as_mut() {
+                    Some(auto) if auto.local_return && auto.armed && auto.activated => {
+                        auto.released = true;
+                        Reply::Recorded
+                    }
+                    _ => Reply::Unavailable,
                 }
             }
             Command::Begin(id)
@@ -285,6 +345,56 @@ mod tests {
         assert_eq!(drops.finished(1), Some(true));
         drops.clear(1);
         assert_eq!(drops.command(Command::Poll(5)), Reply::Unavailable);
+    }
+
+    #[test]
+    fn returned_drop_requires_activation_and_native_release() {
+        let drops = NativeDrops::default();
+        let route = Drag {
+            peer: DeviceId([1; 16]),
+            connection: 4,
+            nonce: NonZeroU64::MIN,
+        };
+        let offer = Offer {
+            id: 60,
+            file: FileOffer {
+                name: "sample.txt".into(),
+                size: 7,
+            },
+        };
+        let expires = Instant::now() + Duration::from_secs(5);
+        assert!(drops.reserve_return(route));
+        assert!(drops.offer_drag(route, 2, offer.clone(), expires));
+        assert!(!drops.activate(60));
+        assert_eq!(drops.command(Command::Released(60)), Reply::Unavailable);
+        assert_eq!(drops.command(Command::Armed(60)), Reply::Recorded);
+        assert_eq!(drops.command(Command::AwaitLocal(60)), Reply::Pending);
+        assert_eq!(drops.command(Command::Released(60)), Reply::Unavailable);
+        assert_eq!(drops.command(Command::Begin(60)), Reply::Unavailable);
+        assert!(!drops.activate(61));
+        assert!(drops.activate(60));
+        assert_eq!(drops.command(Command::AwaitLocal(60)), Reply::Recorded);
+        assert!(
+            !drops.release(60),
+            "forwarded input cannot release a locally owned drag"
+        );
+        assert_eq!(drops.command(Command::Begin(60)), Reply::Unavailable);
+        assert_eq!(drops.command(Command::Released(61)), Reply::Unavailable);
+        assert_eq!(drops.command(Command::Released(60)), Reply::Recorded);
+        assert_eq!(drops.command(Command::Begin(60)), Reply::Pending);
+        assert!(drops.claim(2));
+        drops.end_drag(route, false);
+        assert_eq!(drops.finished(2), Some(false));
+        assert_eq!(drops.command(Command::AwaitLocal(60)), Reply::Unavailable);
+        assert_eq!(drops.command(Command::Released(60)), Reply::Unavailable);
+        assert_eq!(drops.command(Command::Begin(60)), Reply::Unavailable);
+
+        assert!(drops.reserve_return(route));
+        assert!(drops.offer_drag(route, 3, offer, expires));
+        assert_eq!(drops.command(Command::Armed(60)), Reply::Recorded);
+        assert!(drops.activate(60));
+        drops.end_drag(route, false);
+        assert_eq!(drops.command(Command::Released(60)), Reply::Unavailable);
     }
 
     #[test]
