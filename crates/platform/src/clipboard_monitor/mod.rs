@@ -87,25 +87,29 @@ fn clipboard_status(view: &View, direction: usize) -> Option<String> {
     }
     view.transfers[direction]
         .as_ref()
-        .map(|item| match item.phase {
-            Phase::Copying if sending => format!(
-                "Sending to {} · {} / {}",
-                item.peer,
-                size(item.bytes),
-                size(item.total)
-            ),
-            Phase::Copying => format!(
-                "Receiving from {} · {} / {}",
-                item.peer,
-                size(item.bytes),
-                size(item.total)
-            ),
-            Phase::Ready if sending => format!("Ready to paste on {}", item.peer),
-            Phase::Ready => "Ready to paste here".to_owned(),
-            Phase::Dropped => "File dropped".to_owned(),
-            Phase::Cancelled => "Transfer cancelled".to_owned(),
-            Phase::Failed => "Transfer failed".to_owned(),
-        })
+        .map(|item| transfer_status(item, sending))
+}
+
+fn transfer_status(item: &Transfer, sending: bool) -> String {
+    match item.phase {
+        Phase::Copying if sending => format!(
+            "Sending to {} · {} / {}",
+            item.peer,
+            size(item.bytes),
+            size(item.total)
+        ),
+        Phase::Copying => format!(
+            "Receiving from {} · {} / {}",
+            item.peer,
+            size(item.bytes),
+            size(item.total)
+        ),
+        Phase::Ready if sending => format!("Checksum verified by {}", item.peer),
+        Phase::Ready => "Checksum verified · Ready to paste".to_owned(),
+        Phase::Dropped => "File dropped · Checksum verified".to_owned(),
+        Phase::Cancelled => "Transfer cancelled".to_owned(),
+        Phase::Failed => "Transfer failed".to_owned(),
+    }
 }
 
 fn tooltip(view: Option<&View>, limit: usize) -> String {
@@ -159,7 +163,7 @@ fn tooltip_status(view: &View, direction: usize, limit: usize) -> Option<String>
             ));
         }
         if item.phase == Phase::Ready && direction == 0 {
-            return Some("Ready to paste on peer".to_owned());
+            return Some("Checksum verified by peer".to_owned());
         }
     }
     Some(detail)
@@ -221,5 +225,40 @@ impl TransferDisplay {
             self.cancelled = true;
             send(Command::Cancel(id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checksum_status_waits_for_a_successful_file_transfer() {
+        let mut item = Transfer {
+            id: 1,
+            peer: "Mac".into(),
+            label: "sample.txt".into(),
+            items: 1,
+            phase: Phase::Copying,
+            bytes: 100,
+            total: 100,
+        };
+        assert_eq!(
+            transfer_status(&item, false),
+            "Receiving from Mac · 100 B / 100 B"
+        );
+        item.phase = Phase::Failed;
+        assert_eq!(transfer_status(&item, false), "Transfer failed");
+        item.phase = Phase::Ready;
+        assert_eq!(
+            transfer_status(&item, false),
+            "Checksum verified · Ready to paste"
+        );
+        assert_eq!(transfer_status(&item, true), "Checksum verified by Mac");
+        item.phase = Phase::Dropped;
+        assert_eq!(
+            transfer_status(&item, false),
+            "File dropped · Checksum verified"
+        );
     }
 }

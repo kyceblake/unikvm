@@ -1,5 +1,12 @@
 # Progress
 
+## File verification and drag edge visibility
+
+- Both trays show the result of the existing BLAKE3 verification for received files. The receiver reports a match after publishing the clipboard or completing the native drop. The sender reports a match after the peer's success receipt. [Clipboard file verification](clipboard-sync.md#use-the-tray-and-menu-bar)
+- Windows and macOS edge strips show the blue highlight only under the pointer. At rest, the strip keeps the native hit area at minimum opacity so the arriving drag can start immediately.
+- Windows formatting, strict Clippy, all 78 workspace tests, and build passed. The Windows desktop probe confirmed idle hit testing, hover, and clearing the highlight on exit. The Apple Silicon workspace and drag probe passed strict Clippy at compile time.
+- Next, verify the checksum status, hover, and immediate drag handoff on the paired desktops.
+
 ## Explorer-to-Finder held-button handoff
 
 - Native testing found a post-download deadlock: AppKit's file-promise provider already held a coordinated destination write, and the delegate opened a second coordinator for the same URL. Removed the nested claim while retaining atomic no-clobber publication. A native regression writes under an existing coordination claim and passed; workspace tests, formatting, strict Clippy, and build passed. Added content-free native delivery error diagnostics and stopped the stalled helper processes. The operator confirmed successful Windows-to-Finder file delivery after the fix. Also delayed native readiness until the AppKit event loop is running and its window is displayed; the first injected press then starts the drag without requiring a second blue-strip gesture. The operator confirmed the continuous drag works. Independent destination SHA-256 and cancellation checks remain pending.

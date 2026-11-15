@@ -22,7 +22,7 @@ use unikvm_protocol::tray::{Command, Connection, Phase, Transfer, View};
 
 use super::{
     Snapshot, TITLE, TransferDisplay, UI_POLL_MS, clipboard_status, connection, peer_label, size,
-    tooltip,
+    tooltip, transfer_status,
 };
 
 const WIDTH: f64 = 360.0;
@@ -321,11 +321,7 @@ impl Panel {
             let heading = match (direction, item.phase) {
                 (0, Phase::Copying) => format!("Sending to {}", item.peer),
                 (_, Phase::Copying) => format!("Receiving from {}", item.peer),
-                (0, Phase::Ready) => format!("Ready to paste on {}", item.peer),
-                (_, Phase::Ready) => "Ready to paste here".to_owned(),
-                (_, Phase::Dropped) => "File dropped".to_owned(),
-                (_, Phase::Failed) => "Transfer failed".to_owned(),
-                (_, Phase::Cancelled) => "Transfer cancelled".to_owned(),
+                _ => transfer_status(item, direction == 0),
             };
             self.heading.setStringValue(&NSString::from_str(&heading));
             self.cancel.setHidden(item.phase != Phase::Copying);

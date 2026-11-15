@@ -13,6 +13,8 @@ mod macos;
 pub(crate) mod macos_capture;
 #[cfg(target_os = "macos")]
 mod macos_cursor;
+#[cfg(all(target_os = "macos", feature = "macos-file-drag"))]
+pub(crate) use macos_cursor::is_visible as cursor_is_visible;
 #[cfg(target_os = "macos")]
 mod macos_edge;
 #[cfg(target_os = "macos")]

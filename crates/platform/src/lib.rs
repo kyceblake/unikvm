@@ -16,6 +16,9 @@ pub mod drag_probe;
 pub mod file_drop;
 
 #[cfg(all(target_os = "macos", feature = "macos-file-drag"))]
+mod file_drag_edge;
+
+#[cfg(all(target_os = "macos", feature = "macos-file-drag"))]
 pub mod file_drag_source;
 
 #[cfg(all(

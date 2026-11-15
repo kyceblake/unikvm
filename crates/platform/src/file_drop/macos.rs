@@ -17,7 +17,7 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSDragOperation,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSDragOperation,
     NSDraggingContext, NSDraggingItem, NSDraggingSession, NSDraggingSource, NSEvent,
     NSEventModifierFlags, NSEventType, NSFilePromiseProvider, NSFilePromiseProviderDelegate,
     NSFloatingWindowLevel, NSImage, NSImageNameMultipleDocuments, NSScreen, NSView, NSWindow,
@@ -28,6 +28,8 @@ use objc2_foundation::{
     NSString, NSTimer, NSURL,
 };
 use unikvm_core::geometry::Edge;
+
+use crate::file_drag_edge::EdgeHighlight;
 
 const START_TIMEOUT: Duration = Duration::from_secs(45);
 const PROMISE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -76,8 +78,7 @@ pub fn run_received(
         };
         // The outgoing edge observer stays active under the incoming drag strip.
         window.setLevel(NSFloatingWindowLevel + 1);
-        window.setBackgroundColor(Some(&NSColor::systemBlueColor()));
-        window.setAlphaValue(0.25);
+        let _highlight = EdgeHighlight::attach(&window);
 
         let promise = Promise::alloc().set_ivars(PromiseData {
             name: NSString::from_str(name),

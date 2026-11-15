@@ -43,6 +43,8 @@ Live Explorer and Finder gestures both exposed file references before release. T
 
 The Windows source helper observes one file on the configured edge during an unmodified primary-button drag. The input monitor checks that the same physical press is still held on the unlocked desktop before ending the Explorer drag after a peer grant. The Windows source uses the standard left-button primary mapping. [Windows OLE drop target](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragenter) · [Windows input injection](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
 
+The live source and receiver strips highlight only while the pointer is over them. Move the pointer away to check that the strip disappears. Then drag a single file across the edge immediately after entering the strip. The first press should still start the native receiver drag. The strips use a minimum nonzero opacity at rest to preserve native hit testing. [Win32 layered window hit testing](https://learn.microsoft.com/windows/win32/winmsg/window-features) · [AppKit window hit testing](https://developer.apple.com/documentation/appkit/nswindow/windownumber%28at%3Abelowwindowwithwindownumber%3A%29)
+
 The Windows desktop regression verifies the tagged Escape press and release and suppresses both events before they reach the foreground application.
 
 ```powershell
@@ -90,7 +92,7 @@ Use the updated Windows agent and CLI in the same desktop session. Keep file sha
 cargo run --locked -p unikvm-cli -- drag-receive --left
 ```
 
-Press and hold on the highlighted edge, move into the Explorer folder, and release. Windows should show the existing **Download / Decline** prompt only after release. Choose **Download** and compare the destination file's SHA-256 with the source. Test **Decline** and Escape with fresh offers and empty folders. The receiving clipboard should keep its existing contents. The Windows tray reports **File dropped** after Explorer reports a successful copy.
+Press and hold on the highlighted edge, move into the Explorer folder, and release. Windows should show the existing **Download / Decline** prompt only after release. Choose **Download** and confirm the file appears in the destination folder. Test **Decline** and Escape with fresh offers and empty folders. The receiving clipboard should keep its existing contents. The Windows tray reports **File dropped · Checksum verified** after Explorer reports a successful copy.
 
 This preview begins with a clipboard offer from a paired peer. The command starts the native drag on Windows.
 
@@ -106,7 +108,7 @@ Repeat with Escape before release and with **Decline** after release. Neither sh
 
 Update both agents and their desktop helpers. Use the same `input.file_drag = true`, peer sides, and pinned clipboard file-sharing settings as above. Open an empty Finder folder. With the Windows mouse, drag one regular file from Explorer to the left edge when the Mac is on the left. Keep holding until the pointer appears on the Mac, move into Finder, and release.
 
-Approve **Receive** on the Mac and check that the receiving tray reports **File dropped**. Compare the two files with `Get-FileHash -Algorithm SHA256` on Windows and `shasum -a 256` on macOS. Confirm that the source remains in Explorer and that the Mac clipboard keeps its previous contents. Repeat with Escape before release and **Decline** afterward. Each canceled test should leave the destination empty and allow normal pointer control to resume. Use an unlocked desktop and a free primary display edge. One regular file up to 50 MB is supported per drag. Live Finder delivery still needs desktop verification.
+Approve **Receive** on the Mac and check that the receiving tray reports **File dropped · Checksum verified**. Confirm that the file appears in Finder, the source remains in Explorer, and the Mac clipboard keeps its previous contents. Repeat with Escape before release and **Decline** afterward. Each canceled test should leave the destination empty and allow normal pointer control to resume. Use an unlocked desktop and a free primary display edge. One regular file up to 50 MB is supported per drag.
 
 ### Return a Finder drag using the Windows mouse
 

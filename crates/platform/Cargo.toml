@@ -27,7 +27,10 @@ macos-file-drag = [
     "objc2-app-kit/NSRunningApplication",
     "objc2-app-kit/NSScreen",
     "objc2-app-kit/NSWindow",
+    "objc2-foundation/NSDate",
     "objc2-foundation/NSGeometry",
+    "objc2-foundation/NSRunLoop",
+    "objc2-foundation/NSTimer",
 ]
 macos-file-drop = [
     "dep:block2",
@@ -43,7 +46,6 @@ macos-file-drop = [
     "objc2-foundation/NSError",
     "objc2-foundation/NSFileCoordinator",
     "objc2-foundation/NSOperation",
-    "objc2-foundation/NSTimer",
     "objc2-foundation/block2",
 ]
 file-drag-probe = [

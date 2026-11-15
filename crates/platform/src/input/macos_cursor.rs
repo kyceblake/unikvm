@@ -25,7 +25,7 @@ unsafe extern "C" {
     fn CGCursorIsVisible() -> u32;
 }
 
-pub(super) fn is_visible() -> bool {
+pub(crate) fn is_visible() -> bool {
     // SAFETY: This argument-free Quartz function queries global cursor visibility.
     unsafe { CGCursorIsVisible() != 0 }
 }

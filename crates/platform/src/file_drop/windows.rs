@@ -32,7 +32,7 @@ use windows::Win32::{
 use windows::core::{BOOL, HRESULT, Ref, Result, implement};
 use windows_sys::{
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, WPARAM},
+        Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::Gdi::{COLOR_HIGHLIGHT, GetSysColorBrush},
         System::{LibraryLoader::GetModuleHandleW, Ole::CF_HDROP},
         UI::{
@@ -41,16 +41,23 @@ use windows_sys::{
                 INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_LEFTUP, MOUSEINPUT, SendInput,
             },
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-                GetSystemMetrics, LWA_ALPHA, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN,
-                SM_CYSCREEN, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes, SetTimer, ShowWindow,
-                TranslateMessage, WM_CLOSE, WM_LBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
+                GetLayeredWindowAttributes, GetMessageW, GetSystemMetrics, LWA_ALPHA, MSG,
+                PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN, SW_SHOWNOACTIVATE,
+                SetLayeredWindowAttributes, SetTimer, ShowWindow, TranslateMessage, WM_CLOSE,
+                WM_LBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
             },
         },
     },
     core::w,
 };
+
+const EXPIRE_TIMER: usize = 1;
+const HOVER_TIMER: usize = 2;
+// Win32 makes zero-alpha windows click-through, including for the injected press.
+const IDLE_ALPHA: u8 = 1;
+const HOVER_ALPHA: u8 = 64;
 
 #[cfg(feature = "file-drag-probe")]
 use {
@@ -259,10 +266,7 @@ pub fn observe(edge: Edge, file: impl Fn(PathBuf) + 'static) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         // The receiving pointer lands two pixels inside the edge, past this strip.
-        let window = edge_window(edge, 2, WS_EX_LAYERED)?;
-        if SetLayeredWindowAttributes(window.0, 0, 64, LWA_ALPHA) == 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let window = edge_window(edge, 2)?;
         let _registration = Registration::new(
             &window,
             EdgeTarget {
@@ -298,7 +302,7 @@ fn run_edge(
 ) -> io::Result<Option<bool>> {
     // SAFETY: This thread owns the window, registration and message queue.
     unsafe {
-        let window = edge_window(edge, 18, 0)?;
+        let window = edge_window(edge, 18)?;
         #[cfg(feature = "file-drag-probe")]
         let _registration = if object.is_none() {
             Some(Registration::new(
@@ -311,7 +315,7 @@ fn run_edge(
         } else {
             None
         };
-        if SetTimer(window.0, 1, 45_000, None) == 0 {
+        if SetTimer(window.0, EXPIRE_TIMER, 45_000, None) == 0 {
             return Err(io::Error::last_os_error());
         }
         if object.is_some() {
@@ -331,7 +335,12 @@ fn run_edge(
             match GetMessageW(&mut event, null_mut(), 0, 0) {
                 -1 => return Err(io::Error::last_os_error()),
                 0 => return Ok(None),
-                _ if event.hwnd == window.0 && event.message == WM_TIMER => return Ok(None),
+                _ if event.hwnd == window.0
+                    && event.message == WM_TIMER
+                    && event.wParam == EXPIRE_TIMER =>
+                {
+                    return Ok(None);
+                }
                 _ if event.hwnd == window.0 && event.message == WM_LBUTTONDOWN => {
                     if let Some(object) = &object {
                         let source: IDropSource = FileSource {
@@ -355,7 +364,7 @@ fn run_edge(
     }
 }
 
-fn edge_window(edge: Edge, width: i32, extra_style: u32) -> io::Result<Window> {
+fn edge_window(edge: Edge, width: i32) -> io::Result<Window> {
     // SAFETY: This thread owns the class callback and the new window.
     unsafe {
         let left = match edge {
@@ -376,7 +385,7 @@ fn edge_window(edge: Edge, width: i32, extra_style: u32) -> io::Result<Window> {
             return Err(io::Error::last_os_error());
         }
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | extra_style,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
             name,
             name,
             WS_POPUP,
@@ -392,7 +401,13 @@ fn edge_window(edge: Edge, width: i32, extra_style: u32) -> io::Result<Window> {
         if hwnd.is_null() {
             return Err(io::Error::last_os_error());
         }
-        Ok(Window(hwnd))
+        let window = Window(hwnd);
+        if SetLayeredWindowAttributes(hwnd, 0, IDLE_ALPHA, LWA_ALPHA) == 0
+            || SetTimer(hwnd, HOVER_TIMER, 40, None) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(window)
     }
 }
 
@@ -406,6 +421,17 @@ unsafe extern "system" fn window_proc(
     unsafe {
         if message == WM_CLOSE {
             PostQuitMessage(0);
+            0
+        } else if message == WM_TIMER && wp == HOVER_TIMER {
+            let mut pointer = POINT::default();
+            let hovered = GetCursorPos(&mut pointer) != 0 && WindowFromPoint(pointer) == window;
+            let alpha = if hovered { HOVER_ALPHA } else { IDLE_ALPHA };
+            let mut current = 0;
+            if GetLayeredWindowAttributes(window, null_mut(), &mut current, null_mut()) != 0
+                && current != alpha
+            {
+                SetLayeredWindowAttributes(window, 0, alpha, LWA_ALPHA);
+            }
             0
         } else {
             DefWindowProcW(window, message, wp, lp)
@@ -460,6 +486,53 @@ impl Drop for Registration {
 #[cfg(all(test, feature = "file-drag-probe"))]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop with a stationary pointer"]
+    fn idle_edge_receives_hits_and_highlights_only_while_hovered() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            HWND_TOPMOST, SWP_NOACTIVATE, SetWindowPos,
+        };
+
+        let window = edge_window(Edge::Left, 18).unwrap();
+        let mut pointer = POINT::default();
+        // SAFETY: The test moves only its own small overlay. All Win32 outputs
+        // point to live storage and the window remains on this thread.
+        unsafe {
+            assert_ne!(GetCursorPos(&mut pointer), 0);
+            let move_overlay = |x_offset| {
+                assert_ne!(
+                    SetWindowPos(
+                        window.0,
+                        HWND_TOPMOST,
+                        pointer.x - 4 + x_offset,
+                        pointer.y - 4,
+                        9,
+                        9,
+                        SWP_NOACTIVATE,
+                    ),
+                    0
+                );
+            };
+            let alpha = || {
+                let mut value = 0;
+                assert_ne!(
+                    GetLayeredWindowAttributes(window.0, null_mut(), &mut value, null_mut()),
+                    0
+                );
+                value
+            };
+            move_overlay(0);
+            ShowWindow(window.0, SW_SHOWNOACTIVATE);
+            assert_eq!(alpha(), IDLE_ALPHA);
+            assert_eq!(WindowFromPoint(pointer), window.0);
+            window_proc(window.0, WM_TIMER, HOVER_TIMER, 0);
+            assert_eq!(alpha(), HOVER_ALPHA);
+            move_overlay(30);
+            window_proc(window.0, WM_TIMER, HOVER_TIMER, 0);
+            assert_eq!(alpha(), IDLE_ALPHA);
+        }
+    }
 
     #[test]
     fn shell_explorer_data_object_exposes_regular_file_references() {

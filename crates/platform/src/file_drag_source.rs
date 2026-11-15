@@ -8,12 +8,14 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSDragOperation,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSDragOperation,
     NSDraggingInfo, NSFloatingWindowLevel, NSPasteboardTypeFileURL, NSScreen, NSWindow,
     NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{NSArray, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use unikvm_core::geometry::Edge;
+
+use crate::file_drag_edge::EdgeHighlight;
 
 pub fn observe(edge: Edge, file: impl Fn(PathBuf) + 'static) -> io::Result<()> {
     let main = MainThreadMarker::new()
@@ -57,8 +59,7 @@ pub fn observe(edge: Edge, file: impl Fn(PathBuf) + 'static) -> io::Result<()> {
         let delegate: Retained<Target> = unsafe { msg_send![super(delegate), init] };
         window.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         window.setLevel(NSFloatingWindowLevel);
-        window.setBackgroundColor(Some(&NSColor::systemBlueColor()));
-        window.setAlphaValue(0.2);
+        let _highlight = EdgeHighlight::attach(&window);
         // SAFETY: AppKit provides this static pasteboard type.
         window.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
         app.finishLaunching();
