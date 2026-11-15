@@ -55,7 +55,7 @@ Work **incrementally**. Begin with a feasibility and repository foundation miles
 
 6. **Large files with user approval**
    - File copies create metadata-only offers rather than eagerly transferring data.
-   - With file sharing enabled on both peers, receive copies up to 5 MB automatically. Show a native approval prompt for larger clipboard copies up to the 50 MB total limit.
+   - With file sharing enabled on both peers, prompt on a receiving device when the user presses Paste for a pending file offer. Deliver file bytes to the peers that approve. Inline clipboard copies up to 5 MB transfer automatically. The total limit is 50 MB.
    - Stream data with bounded buffers over dedicated reliable QUIC streams.
    - Support multiple files, progress, cancellation, BLAKE3 integrity checks, and safe temporary/staging paths.
    - Add resumable transfers after the basic transfer path is correct.
@@ -237,10 +237,10 @@ The schema must be versioned and forward-compatible. All fields from untrusted p
 
 ### Phase 5 — file offers and large transfers
 
-- Add metadata-only clipboard offers, size-based recipient confirmation, chunked streaming, staging, progress, cancellation, verification, and native file paste.
+- Add metadata-only clipboard offers, paste-triggered file confirmation, chunked streaming, staging, progress, cancellation, verification, and native file paste.
 - Verify the 50 MB limit and input responsiveness during a full transfer. Resume support and larger transfers are later milestones.
 
-**Done when:** Transfers use bounded memory, obtain approval above 5 MB, verify copied data, and publish only complete batches.
+**Done when:** Transfers use bounded memory, obtain recipient approval for every file copy and any inline copy above 5 MB, verify copied data, and publish only complete batches.
 
 ### Phase 6 — hardening and first release
 

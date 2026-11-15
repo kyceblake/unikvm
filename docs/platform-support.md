@@ -12,6 +12,8 @@ The native clipboard window showed the active clipboard session on Windows using
 
 For clipboard v5, a Windows test round-tripped multiple Unicode paths through the native `CF_HDROP` format. A desktop probe displayed a synthetic 6 MB offer and verified **Decline**. Apple Silicon strict Clippy passed for the AppKit prompt and pasteboard adapter. A real Explorer-to-Finder paste and the reverse direction still need testing with both agents updated.
 
+For clipboard v6, the Windows native hook probe intercepted a UniKVM-tagged Ctrl+V for a pending file offer and passed the shortcut through when the clipboard sequence differed. Apple Silicon strict Clippy passed for the Quartz shortcut path. The live Windows-to-Mac and Mac-to-Windows paste flow still needs verification with both agents updated.
+
 | Desktop | Capture and suppression | Injection | Hotkeys and edge handling | Permissions and verification |
 | --- | --- | --- | --- | --- |
 | Windows | Low-level keyboard and mouse hooks on a message-pump thread. Verified physical F9 suppression and tagged synthetic event filtering. | `SendInput` with injection flags and extra-info marker verified for F24 press/release and relative mouse move. | Ctrl+Shift+F10 delivery verified in the physical probe. `SetCursorPos` reached two pixels at a monitor's right edge. Ordinary cross-monitor motion still needs testing. | Opening the input desktop and comparing it with the current thread desktop passed. UIPI blocks injection into higher-integrity apps. Secure desktops, protected targets, mixed DPI, and default Win-key bindings still need testing. |
@@ -35,6 +37,7 @@ Run these from an interactive desktop with a harmless foreground window. The pro
 cargo run --locked -p unikvm-platform --example input_probe
 cargo run --locked -p unikvm-platform --example input_probe -- --manual
 cargo run --locked -p unikvm-platform --example input_probe -- --suppress-f9
+cargo test --locked -p unikvm-platform clipboard_offer_intercepts_tagged_paste_only_for_the_current_copy -- --ignored --nocapture
 ```
 
 For the manual run, move the mouse and press Ctrl+Shift+F10 during the ten-second window. For the suppression run, also tap F9 before the hotkey. A passing run reports at least two blocked physical F9 events and zero downstream F9 events. Only F9 is suppressed in this mode. Verify ordinary cross-monitor motion, permission changes, and elevated-window behavior on a dedicated test desktop before integrating a Windows backend.

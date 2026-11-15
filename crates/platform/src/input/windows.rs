@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use unikvm_core::input::{InputEvent, KeyUsage, PointerButton};
 use windows_sys::Win32::Foundation::{LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_READOBJECTS, GetThreadDesktop, GetUserObjectInformationW, HDESK,
@@ -22,7 +23,9 @@ use windows_sys::Win32::System::Threading::{CreateEventW, GetCurrentThreadId, Se
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F9, VK_F10};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VK_CONTROL, VK_F9, VK_F10, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, HHOOK, HOOKPROC, KBDLLHOOKSTRUCT,
     LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE,
@@ -33,14 +36,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_XBUTTONUP,
 };
 
-use super::EdgeLayout;
 use super::capture::{
-    ARM_DELAY, Command, IdleCursor, MonitorWake, POLL, PhysicalMotion, Shortcut, activity,
-    button_state, request_start,
+    ARM_DELAY, Command, IdleCursor, MonitorOptions, MonitorWake, POLL, PasteShortcut,
+    PhysicalMotion, Shortcut, activity, button_state, request_start,
 };
 use super::edge::EdgeTrigger;
 use super::windows_cursor::ParkedCursor;
 use super::windows_raw_mouse::RawMouse;
+use super::windows_sink::EVENT_TAG;
 use unikvm_core::geometry::Point;
 
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
@@ -70,6 +73,7 @@ struct HookState {
     motion: PhysicalMotion,
     edge: Option<EdgeTrigger>,
     pointer_buttons: [bool; 5],
+    paste: PasteShortcut,
 }
 
 pub(super) fn run_hooks(
@@ -78,9 +82,14 @@ pub(super) fn run_hooks(
     events: mpsc::Sender<InputEvent>,
     stop: Arc<AtomicBool>,
     initialized: &std::sync::mpsc::SyncSender<io::Result<MonitorWake>>,
-    allow_send: bool,
-    edge: Option<EdgeLayout>,
+    options: MonitorOptions,
 ) -> io::Result<()> {
+    let MonitorOptions {
+        allow_send,
+        edge,
+        paste,
+        keyboard_only,
+    } = options;
     // SAFETY: This dedicated hook thread owns its DPI context.
     if unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.is_null()
     {
@@ -122,10 +131,13 @@ pub(super) fn run_hooks(
             motion: PhysicalMotion::default(),
             edge: edge.map(EdgeTrigger::new),
             pointer_buttons: [false; 5],
+            paste: PasteShortcut::new(paste),
         });
     });
     let _keyboard = Hook::install(WH_KEYBOARD_LL, keyboard_hook)?;
-    let _mouse = Hook::install(WH_MOUSE_LL, mouse_hook)?;
+    let _mouse = (!keyboard_only)
+        .then(|| Hook::install(WH_MOUSE_LL, mouse_hook))
+        .transpose()?;
     let signal = wake.clone();
     initialized
         .send(Ok(Box::new(move || {
@@ -153,6 +165,7 @@ pub(super) fn run_hooks(
             let state = state.as_mut().expect("hook state initialized");
             if !desktop_available {
                 if desktop_lost {
+                    state.paste.reset();
                     activity(&state.shortcuts);
                     state.emergency();
                 }
@@ -290,6 +303,9 @@ impl HookState {
         }
 
         let vk = event.vkCode as u16;
+        if self.paste(event, false, pressed) {
+            return true;
+        }
         if self.allow_send && matches!(vk, VK_F9 | VK_F10) {
             let index = usize::from(vk == VK_F10);
             if self.chords[index] {
@@ -328,6 +344,26 @@ impl HookState {
             self.swallowed_keys[index] = false;
         }
         false
+    }
+
+    fn paste(&mut self, event: &KBDLLHOOKSTRUCT, tagged: bool, pressed: bool) -> bool {
+        let local = !self.remote;
+        self.paste
+            .key(event.scanCode as u16, tagged, pressed, |requests| {
+                if !local || event.vkCode != u32::from(VK_V) {
+                    return false;
+                }
+                // SAFETY: Query the state of earlier modifier events, never the V event
+                // currently being delivered to the hook.
+                let down = |vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0;
+                down(VK_CONTROL)
+                    && !down(VK_V)
+                    && ![VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN].into_iter().any(down)
+                    && requests.intercept(|| {
+                        // SAFETY: Reads the sequence for the current window station.
+                        Ok(u64::from(unsafe { GetClipboardSequenceNumber() }))
+                    })
+            })
     }
 
     fn pointer(&mut self, event: &MSLLHOOKSTRUCT, message: u32) -> bool {
@@ -467,15 +503,24 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         // SAFETY: WH_KEYBOARD_LL provides a live KBDLLHOOKSTRUCT for HC_ACTION.
         let event = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
         let pressed = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
-        if event.flags & LLKHF_INJECTED == 0
-            && HOOK_STATE.with(|state| {
-                state
-                    .try_borrow_mut()
-                    .ok()
-                    .and_then(|mut state| state.as_mut().map(|state| state.key(event, pressed)))
-                    .unwrap_or(false)
-            })
-        {
+        if HOOK_STATE.with(|state| {
+            state
+                .try_borrow_mut()
+                .ok()
+                .and_then(|mut state| {
+                    state.as_mut().map(|state| {
+                        if event.flags & LLKHF_INJECTED == 0 {
+                            state.key(event, pressed)
+                        } else if event.dwExtraInfo == EVENT_TAG {
+                            state.check_capture_command();
+                            state.paste(event, true, pressed)
+                        } else {
+                            false
+                        }
+                    })
+                })
+                .unwrap_or(false)
+        }) {
             return 1;
         }
     }
@@ -642,6 +687,7 @@ mod tests {
             motion: PhysicalMotion::default(),
             edge: None,
             pointer_buttons: [false; 5],
+            paste: PasteShortcut::default(),
         }
     }
 
@@ -663,6 +709,64 @@ mod tests {
         drop(capture);
         let capture = super::super::Capture::start(false).unwrap();
         assert_eq!(capture.shortcuts.borrow().start, 0);
+    }
+
+    #[test]
+    #[ignore = "requires an interactive Windows input desktop"]
+    fn clipboard_offer_intercepts_tagged_paste_only_for_the_current_copy() {
+        use crate::clipboard::{Clipboard, PasteRequests};
+        use crate::input::{Capture, InputSink};
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+
+        static FORWARDED: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "system" fn guard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            if code == 0 {
+                // SAFETY: WH_KEYBOARD_LL supplies a live KBDLLHOOKSTRUCT for HC_ACTION.
+                let key = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+                if key.dwExtraInfo == EVENT_TAG && key.vkCode == u32::from(VK_V) {
+                    FORWARDED.fetch_add(1, Relaxed);
+                    // Keep the probe from pasting into the foreground app.
+                    return 1;
+                }
+            }
+            // SAFETY: Forward the original hook arguments.
+            unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
+        }
+
+        let _guard = Hook::install(WH_KEYBOARD_LL, guard).unwrap();
+        let requests = PasteRequests::default();
+        let _capture = Capture::for_paste(requests.clone()).unwrap();
+        let sequence = Clipboard::new().unwrap().sequence().unwrap();
+        for (token, expected, forwarded) in [(1, sequence, 0), (2, sequence + 1, 2)] {
+            requests.arm(token, expected, Instant::now() + Duration::from_secs(5));
+            let injector = thread::spawn(|| -> io::Result<()> {
+                let mut sink = InputSink::new()?;
+                for (usage, pressed) in [(0xe0, true), (0x19, true), (0x19, false), (0xe0, false)] {
+                    sink.send(InputEvent::Key {
+                        usage: KeyUsage(usage),
+                        state: button_state(pressed),
+                    })?;
+                }
+                Ok(())
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !injector.is_finished() && Instant::now() < deadline {
+                let mut message = MSG::default();
+                // SAFETY: This test thread owns the queue and writes into an owned MSG.
+                unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) };
+                thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                injector.is_finished(),
+                "input hook queue stopped responding"
+            );
+            injector.join().unwrap().unwrap();
+            assert_eq!(requests.requested(token), token == 1);
+            assert_eq!(FORWARDED.load(Relaxed), forwarded);
+        }
     }
 
     #[test]

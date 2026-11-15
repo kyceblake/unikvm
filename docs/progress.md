@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-14 — Phase 5 paste-triggered file transfers
+
+- Clipboard v6 offers file names and sizes to explicitly configured peers. A receiving device requests an offer with Ctrl+V or ⌘V and confirms it in a native prompt. Only the approving peer receives bytes. A newer local clipboard copy takes priority. Once the transfer is ready, Paste places the verified files in the selected app or folder.
+- Windows formatting, strict Clippy, build, and 65 workspace tests passed. The Windows desktop input probe and a dedicated tagged Ctrl+V regression passed. Apple Silicon and Linux strict Clippy passed as compile-time checks.
+- Next, update the paired Windows and Mac desktops and verify the native prompt, approval, and final paste in both directions. When a third desktop is available, verify that its clipboard and incoming byte count stay unchanged when only another device approves. [Setup and test steps](clipboard-sync.md)
+
 ## 2026-11-14 — Clipboard v5 file transfer
 
 - Clipboard copies up to 5 MB transfer automatically. Larger copies up to 50 MB require a native receiver prompt. Files have a separate opt-in. Completed files are staged privately and published to the native clipboard for pasting into an app or folder.

@@ -35,7 +35,7 @@ impl Control {
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub async fn run(self) -> Result<()> {
+    pub async fn run(self, paste: Option<unikvm_platform::clipboard::PasteRequests>) -> Result<()> {
         use tracing::info;
         use unikvm_core::geometry::Edge;
         use unikvm_platform::input::{Capture, EdgeLayout};
@@ -53,7 +53,7 @@ impl Control {
             .transpose()
             .context("read primary display for edge switching")?;
         let mut capture =
-            Capture::with_edge(allow_send, edge).context("start local input monitor")?;
+            Capture::with_paste(allow_send, edge, paste).context("start local input monitor")?;
         if let Some(edge) = edge {
             info!(side = ?edge.side, "primary display edge switching enabled");
         }

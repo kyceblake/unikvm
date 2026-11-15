@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 
 use super::windows::{check_input_desktop, key_usage, physical_input_held};
 
-const EVENT_TAG: usize = 0x554b564d;
+pub(super) const EVENT_TAG: usize = 0x554b564d;
 const BUTTONS: [PointerButton; 5] = [
     PointerButton::Primary,
     PointerButton::Secondary,

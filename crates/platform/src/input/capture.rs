@@ -18,12 +18,60 @@ use super::macos_cursor::BackgroundCursor;
 use super::windows::run_hooks as run_monitor;
 #[cfg(target_os = "windows")]
 use super::windows_cursor::ParkedCursor;
+use crate::clipboard::PasteRequests;
 
 const QUEUE_SIZE: usize = 256;
 pub(super) const POLL: Duration = Duration::from_millis(20);
 pub(super) const ARM_DELAY: Duration = Duration::from_secs(3);
 
 pub(super) type MonitorWake = Box<dyn Fn() + Send + Sync>;
+
+pub(super) struct MonitorOptions {
+    pub allow_send: bool,
+    pub edge: Option<EdgeLayout>,
+    pub paste: Option<PasteRequests>,
+    pub keyboard_only: bool,
+}
+
+#[derive(Default)]
+pub(super) struct PasteShortcut {
+    requests: Option<PasteRequests>,
+    held: [Option<u16>; 2],
+}
+
+impl PasteShortcut {
+    pub fn new(requests: Option<PasteRequests>) -> Self {
+        Self {
+            requests,
+            ..Self::default()
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.held = [None; 2];
+    }
+
+    pub fn key(
+        &mut self,
+        code: u16,
+        tagged: bool,
+        pressed: bool,
+        request: impl FnOnce(&PasteRequests) -> bool,
+    ) -> bool {
+        let held = &mut self.held[usize::from(tagged)];
+        if *held == Some(code) {
+            if !pressed {
+                *held = None;
+            }
+            return true;
+        }
+        if pressed && held.is_none() && self.requests.as_ref().is_some_and(request) {
+            *held = Some(code);
+            return true;
+        }
+        false
+    }
+}
 
 #[cfg(target_os = "macos")]
 type IdleCursorGuard = BackgroundCursor;
@@ -75,6 +123,32 @@ impl Capture {
     }
 
     pub fn with_edge(allow_send: bool, edge: Option<EdgeLayout>) -> io::Result<Self> {
+        Self::with_paste(allow_send, edge, None)
+    }
+
+    pub fn for_paste(paste: PasteRequests) -> io::Result<Self> {
+        Self::monitor(MonitorOptions {
+            allow_send: false,
+            edge: None,
+            paste: Some(paste),
+            keyboard_only: true,
+        })
+    }
+
+    pub fn with_paste(
+        allow_send: bool,
+        edge: Option<EdgeLayout>,
+        paste: Option<PasteRequests>,
+    ) -> io::Result<Self> {
+        Self::monitor(MonitorOptions {
+            allow_send,
+            edge,
+            paste,
+            keyboard_only: false,
+        })
+    }
+
+    fn monitor(options: MonitorOptions) -> io::Result<Self> {
         let (commands, receiver) = watch::channel(Command::Local {
             return_height: None,
         });
@@ -86,15 +160,7 @@ impl Capture {
         let worker = thread::Builder::new()
             .name("unikvm input monitor".into())
             .spawn(move || {
-                let result = run_monitor(
-                    receiver,
-                    signals,
-                    events,
-                    stopped,
-                    &initialized,
-                    allow_send,
-                    edge,
-                );
+                let result = run_monitor(receiver, signals, events, stopped, &initialized, options);
                 if let Err(error) = result {
                     let _ = initialized.try_send(Err(error));
                 }

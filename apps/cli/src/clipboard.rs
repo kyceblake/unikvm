@@ -106,19 +106,24 @@ mod desktop {
     }
 
     fn row(direction: Direction, phase: ClipboardPhase, progress: Progress) -> Row {
-        use ClipboardPhase::{Copying, Declined, Failed, Idle, Ready, Skipped, TooLarge, Waiting};
+        use ClipboardPhase::{
+            Copying, Declined, Failed, Idle, Offered, Ready, Skipped, TooLarge, Waiting,
+        };
         use Direction::{Incoming, Outgoing};
 
         let text = match (direction, phase) {
             (_, Idle) => "Waiting for a copy",
-            (Outgoing, Copying) => "Copying to the other computer…",
+            (Outgoing, Copying) => "Copying to a receiving device…",
             (Incoming, Copying) => "Receiving clipboard…",
-            (Outgoing, Ready) => "Ready to paste on the other computer",
+            (Outgoing, Ready) => "Ready to paste on a receiving device",
             (Incoming, Ready) => "Ready to paste here",
             (Outgoing, Failed) => "Copy couldn’t be confirmed",
             (Incoming, Failed) => "Couldn’t put the copy on this clipboard",
             (_, Skipped) => "This clipboard entry was skipped",
             (_, Waiting) => "Waiting for approval",
+            (Outgoing, Offered) => "File offered. Paste on a receiving device",
+            (Incoming, Offered) if cfg!(target_os = "macos") => "Press ⌘V to request the file",
+            (Incoming, Offered) => "Press Ctrl+V to request the file",
             (_, TooLarge) => "Copy exceeds the 50 MB limit",
             (_, Declined) => "Copy declined",
         };

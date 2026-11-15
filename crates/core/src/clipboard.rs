@@ -10,6 +10,7 @@ pub const MAX_HTML_BYTES: usize = MAX_BYTES as usize;
 pub const MAX_PNG_BYTES: usize = MAX_BYTES as usize;
 pub const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
+#[derive(Clone)]
 pub enum Content {
     Text { plain: String, html: Option<String> },
     Png(Vec<u8>),

@@ -31,14 +31,14 @@ use tokio::sync::{mpsc, watch};
 use unikvm_core::geometry::Point;
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
-use super::EdgeLayout;
 use super::capture::{
-    ARM_DELAY, Command, IdleCursor, MonitorWake, POLL, PhysicalMotion, Shortcut, activity,
-    button_state, request_start,
+    ARM_DELAY, Command, IdleCursor, MonitorOptions, MonitorWake, POLL, PasteShortcut,
+    PhysicalMotion, Shortcut, activity, button_state, request_start,
 };
 use super::edge::EdgeTrigger;
 use super::macos::{EVENT_TAG, MacInputSink, key_code};
 use super::macos_cursor::BackgroundCursor;
+use crate::clipboard::Clipboard;
 
 const EVENT_TYPES: [CGEventType; 14] = {
     use CGEventType::*;
@@ -76,6 +76,12 @@ unsafe extern "C" {
     fn CGEventTapIsEnabled(tap: CFMachPortRef) -> bool;
     fn CGEventSourceKeyState(source: i32, key: u16) -> bool;
     fn CGEventSourceButtonState(source: i32, button: u32) -> bool;
+    fn CGEventKeyboardGetUnicodeString(
+        event: CGEventRef,
+        max_length: std::ffi::c_ulong,
+        actual_length: *mut std::ffi::c_ulong,
+        utf16: *mut u16,
+    );
     fn CGRequestListenEventAccess() -> bool;
 }
 
@@ -108,6 +114,8 @@ struct TapState {
     edge: Option<EdgeTrigger>,
     scroll_remainder: [f64; 2],
     suspended: bool,
+    paste: PasteShortcut,
+    pasteboard: Option<Clipboard>,
 }
 
 /// The native tap can disappear while macOS owns protected keyboard input.
@@ -120,9 +128,17 @@ struct InstalledTap {
 }
 
 impl InstalledTap {
-    fn new(state: &RefCell<TapState>, run_loop: &CFRunLoop, mode: CFStringRef) -> io::Result<Self> {
+    fn new(
+        state: &RefCell<TapState>,
+        run_loop: &CFRunLoop,
+        mode: CFStringRef,
+        keyboard_only: bool,
+    ) -> io::Result<Self> {
         let mask = EVENT_TYPES
             .into_iter()
+            .filter(|kind| {
+                !keyboard_only || matches!(kind, CGEventType::KeyDown | CGEventType::KeyUp)
+            })
             .fold(0, |mask, kind| mask | (1u64 << kind as u32));
         // SAFETY: The caller keeps state alive until this tap is invalidated.
         // The nullable disable notifications are handled before wrapping events.
@@ -249,14 +265,20 @@ pub(super) fn run_tap(
     events: mpsc::Sender<InputEvent>,
     stop: Arc<AtomicBool>,
     initialized: &std::sync::mpsc::SyncSender<io::Result<MonitorWake>>,
-    allow_send: bool,
-    edge: Option<EdgeLayout>,
+    options: MonitorOptions,
 ) -> io::Result<()> {
+    let MonitorOptions {
+        allow_send,
+        edge,
+        paste,
+        keyboard_only,
+    } = options;
     if !MacInputSink::has_permission() {
         return Err(tap_permission());
     }
     let run_loop = CFRunLoop::get_current();
     let wake = Arc::new(RunLoopWake::new(run_loop.clone())?);
+    let pasteboard = paste.as_ref().map(|_| Clipboard::new()).transpose()?;
     let state = RefCell::new(TapState {
         commands,
         shortcuts,
@@ -275,6 +297,8 @@ pub(super) fn run_tap(
         edge: edge.map(EdgeTrigger::new),
         scroll_remainder: [0.0; 2],
         suspended: false,
+        paste: PasteShortcut::new(paste),
+        pasteboard,
     });
     // SAFETY: Core Foundation's default mode is a valid static run loop mode.
     let mode = unsafe { kCFRunLoopDefaultMode };
@@ -285,7 +309,7 @@ pub(super) fn run_tap(
     let mut tap = if protected {
         None
     } else {
-        Some(InstalledTap::new(&state, &run_loop, mode)?)
+        Some(InstalledTap::new(&state, &run_loop, mode, keyboard_only)?)
     };
     run_loop.add_source(&wake.source, mode);
 
@@ -315,7 +339,7 @@ pub(super) fn run_tap(
                     // Drop the old port before replacing it; never leave two
                     // filters registered for the same physical event stream.
                     drop(tap.take());
-                    tap = Some(InstalledTap::new(&state, &run_loop, mode)?);
+                    tap = Some(InstalledTap::new(&state, &run_loop, mode, keyboard_only)?);
                 }
                 TapAction::Stop => return Err(io::Error::other("Quartz event tap was disabled")),
             }
@@ -374,19 +398,20 @@ unsafe extern "C" fn tap_callback(
     }
     // SAFETY: A non-null event is live for the callback; Quartz retains ownership.
     let event = ManuallyDrop::new(unsafe { CGEvent::from_ptr(raw) });
-    if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == EVENT_TAG
-        || event.get_integer_value_field(EventField::EVENT_SOURCE_UNIX_PROCESS_ID) != 0
-    {
+    let tagged = event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == EVENT_TAG;
+    if !tagged && event.get_integer_value_field(EventField::EVENT_SOURCE_UNIX_PROCESS_ID) != 0 {
         return raw;
     }
     if state.suspended || secure_input() || super::macos_session::capture_unavailable() {
         state.set_suspended(true);
         // Never forward or suppress protected physical input. Mouse activity can
         // still reclaim an incoming session when Quartz delivers it to this tap.
-        state.protected_activity(&event);
+        if !tagged {
+            state.protected_activity(&event);
+        }
         return raw;
     }
-    if state.capture(&event) {
+    if (tagged && state.paste(&event, true)) || (!tagged && state.capture(&event)) {
         null_mut()
     } else {
         raw
@@ -402,6 +427,7 @@ impl TapState {
             self.chords = [false; 2];
             self.swallowed_keys = [false; 256];
             self.swallowed_buttons = [false; 5];
+            self.paste.reset();
             self.motion = PhysicalMotion::default();
         }
         self.suspended = suspended;
@@ -543,7 +569,7 @@ impl TapState {
             KeyDown | KeyUp | FlagsChanged => {
                 activity(&self.shortcuts);
                 let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
-                self.key(code, kind, event.get_flags())
+                self.paste(event, false) || self.key(code, kind, event.get_flags())
             }
             MouseMoved | LeftMouseDragged | RightMouseDragged | OtherMouseDragged => {
                 let delta = [
@@ -604,6 +630,31 @@ impl TapState {
             }
             _ => false,
         }
+    }
+
+    fn paste(&mut self, event: &CGEvent, tagged: bool) -> bool {
+        use CGEventType::{KeyDown, KeyUp};
+        let Some(pasteboard) = self.pasteboard.as_ref() else {
+            return false;
+        };
+        let kind = event.get_type();
+        if !matches!(kind, KeyDown | KeyUp) {
+            return false;
+        }
+        let local = self.cursor.is_none();
+        let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u16;
+        self.paste
+            .key(code, tagged, matches!(kind, KeyDown), |requests| {
+                let modifiers = CGEventFlags::CGEventFlagControl
+                    | CGEventFlags::CGEventFlagShift
+                    | CGEventFlags::CGEventFlagAlternate
+                    | CGEventFlags::CGEventFlagCommand;
+                local
+                    && (event.get_flags() & modifiers) == CGEventFlags::CGEventFlagCommand
+                    && event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) == 0
+                    && paste_key(event, code)
+                    && requests.intercept(|| pasteboard.sequence())
+            })
     }
 
     fn key(&mut self, code: u16, kind: CGEventType, flags: CGEventFlags) -> bool {
@@ -712,6 +763,18 @@ impl TapState {
     }
 }
 
+fn paste_key(event: &CGEvent, code: u16) -> bool {
+    let mut character = 0;
+    let mut length = 0;
+    // SAFETY: The event is live and the buffer holds the single code unit requested.
+    unsafe { CGEventKeyboardGetUnicodeString(event.as_ptr(), 1, &mut length, &mut character) };
+    match (length, character) {
+        (1, 0x56 | 0x76) => true,
+        (1, 0x41..=0x5a | 0x61..=0x7a) => false,
+        _ => code == KeyCode::ANSI_V,
+    }
+}
+
 struct CapturedCursor {
     source: CGEventSource,
     anchor: CGPoint,
@@ -788,6 +851,7 @@ pub(super) fn physical_input_held() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::EdgeLayout;
 
     #[test]
     fn protected_desktop_preserves_monitor_and_recreates_full_tap_on_resume() {

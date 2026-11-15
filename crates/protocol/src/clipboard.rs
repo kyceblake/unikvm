@@ -7,8 +7,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use unikvm_core::clipboard::{AUTO_BYTES, MAX_BYTES, MAX_FILES};
 use unikvm_core::device::DeviceId;
 
-pub const READY: &[u8] = b"CLIP/5\n";
-pub const DATA: &[u8] = b"CLIP-DATA/5\n";
+pub const READY: &[u8] = b"CLIP/6\n";
+pub const DATA: &[u8] = b"CLIP-DATA/6\n";
 pub const MAX_NAME_BYTES: usize = 240;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -55,7 +55,11 @@ impl Layout {
     }
 
     pub fn requires_approval(&self) -> io::Result<bool> {
-        Ok(self.total()? > AUTO_BYTES)
+        Ok(self.total()? > AUTO_BYTES || self.is_file())
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::Files(_))
     }
 }
 
@@ -71,6 +75,7 @@ pub enum Control {
     Decision { id: NonZeroU64, accept: bool },
     Receipt { id: NonZeroU64, applied: bool },
     Withdraw(NonZeroU64),
+    Request(NonZeroU64),
 }
 
 pub fn valid_name(name: &str) -> bool {
@@ -137,8 +142,13 @@ pub async fn write(writer: &mut (impl AsyncWrite + Unpin), control: &Control) ->
         }
         Control::Decision { id, accept } => write_result(writer, 2, *id, *accept).await?,
         Control::Receipt { id, applied } => write_result(writer, 3, *id, *applied).await?,
-        Control::Withdraw(id) => {
-            writer.write_u8(4).await?;
+        Control::Withdraw(id) | Control::Request(id) => {
+            let tag = if matches!(control, Control::Withdraw(_)) {
+                4
+            } else {
+                5
+            };
+            writer.write_u8(tag).await?;
             writer.write_u64(id.get()).await?;
         }
     }
@@ -208,6 +218,7 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Control> 
             applied: read_flag(reader).await?,
         }),
         4 => Ok(Control::Withdraw(id)),
+        5 => Ok(Control::Request(id)),
         _ => Err(invalid()),
     }
 }
@@ -247,6 +258,12 @@ mod tests {
         write(&mut wire, &offer).await.unwrap();
         assert!(wire.len() < 80);
         assert_eq!(read(&mut wire.as_slice()).await.unwrap(), offer);
+
+        let request = Control::Request(NonZeroU64::MIN);
+        wire.clear();
+        write(&mut wire, &request).await.unwrap();
+        assert_eq!(wire.len(), 9);
+        assert_eq!(read(&mut wire.as_slice()).await.unwrap(), request);
     }
 
     #[test]
@@ -261,6 +278,11 @@ mod tests {
                 (size <= MAX_BYTES).then_some(size > AUTO_BYTES)
             );
         }
+        let file = Layout::Files(vec![FileOffer {
+            name: "small.png".into(),
+            size: 1,
+        }]);
+        assert!(file.requires_approval().unwrap());
         for name in [
             "..", "a/../b", "C:secret", "CON.txt", "name.", "name ", "x\\y",
         ] {

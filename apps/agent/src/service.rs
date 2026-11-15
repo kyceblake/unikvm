@@ -29,6 +29,12 @@ pub async fn run(config: &Config) -> Result<()> {
         .as_ref()
         .map(|input| crate::input::Control::new(input, network.as_ref()))
         .transpose()?;
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    let paste = config
+        .clipboard
+        .as_ref()
+        .filter(|clipboard| clipboard.files)
+        .map(|_| unikvm_platform::clipboard::PasteRequests::default());
     let (clipboard_status, clipboard_view) =
         tokio::sync::watch::channel(ClipboardStatus::default());
     let (offer, offered) = tokio::sync::watch::channel(None);
@@ -42,7 +48,15 @@ pub async fn run(config: &Config) -> Result<()> {
         .clipboard
         .as_ref()
         .map(|config| {
-            crate::clipboard::start(config, network.as_ref(), clipboard_status, offer, decisions)
+            crate::clipboard::start(
+                config,
+                network.as_ref(),
+                clipboard_status,
+                offer,
+                decisions,
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                paste.clone(),
+            )
         })
         .transpose()?;
     let peer_service = network.map(|endpoint| {
@@ -63,11 +77,27 @@ pub async fn run(config: &Config) -> Result<()> {
     let local = async {
         let local = serve(&mut listener, shutdown, pid, started, ipc);
         let control = async {
-            if let Some(control) = control
-                && let Err(error) = control.run().await
-            {
-                warn!(%error, "input control stopped");
+            if let Some(control) = control {
+                let result = control
+                    .run(
+                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                        paste.clone(),
+                    )
+                    .await;
+                if let Err(error) = result {
+                    warn!(%error, "input control stopped");
+                }
             }
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            let _paste_monitor = paste.and_then(|requests| {
+                match unikvm_platform::input::Capture::for_paste(requests) {
+                    Ok(monitor) => Some(monitor),
+                    Err(error) => {
+                        warn!(%error, "clipboard paste shortcut unavailable");
+                        None
+                    }
+                }
+            });
             std::future::pending::<()>().await;
         };
         tokio::select! {

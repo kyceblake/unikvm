@@ -1,20 +1,25 @@
+use std::cell::{Cell, RefCell};
 use std::future::{Future, pending};
 use std::num::NonZeroU64;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::task::{JoinSet, LocalSet};
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout};
 use tracing::{debug, info, warn};
 use unikvm_clipboard::Revisions;
 use unikvm_config::ClipboardConfig;
 use unikvm_core::clipboard::Content;
 use unikvm_core::device::DeviceId;
-use unikvm_network::PeerEndpoint;
-use unikvm_platform::clipboard::{Clipboard, WriteOutcome, open_source, staging_directory};
-use unikvm_protocol::clipboard::{self, Control, DATA, Layout, Offer, READY};
+use unikvm_network::{PeerEndpoint, identity::Fingerprint};
+use unikvm_platform::clipboard::{
+    Clipboard, PasteRequests, Snapshot, WriteOutcome, open_source, staging_directory,
+};
+use unikvm_protocol::clipboard::{self, Control, DATA, Offer, READY};
 use unikvm_protocol::local::{
     Approval, ApprovalDecision, ClipboardPhase as Phase, ClipboardStatus, Progress,
 };
@@ -26,6 +31,7 @@ use super::staging::Staging;
 const POLL: Duration = Duration::from_millis(150);
 const HANDSHAKE: Duration = Duration::from_secs(5);
 const APPROVAL: Duration = Duration::from_secs(60);
+const FILE_OFFER: Duration = Duration::from_secs(600);
 const IN_FLIGHT: Duration = Duration::from_secs(300);
 const APPLY: Duration = Duration::from_secs(30);
 
@@ -47,22 +53,21 @@ pub fn start(
     status: watch::Sender<ClipboardStatus>,
     approval: watch::Sender<Option<Approval>>,
     decisions: mpsc::Receiver<ApprovalDecision>,
+    paste: Option<PasteRequests>,
 ) -> Result<Worker> {
-    let peer = config.peer_fingerprint.parse()?;
     let endpoint = endpoint.context("clipboard sharing requires a network endpoint")?;
-    let connections = endpoint
-        .connection(peer)
-        .context("clipboard peer is not trusted")?;
+    let peers = config
+        .peers()
+        .map(|peer| {
+            let fingerprint: Fingerprint = peer.parse()?;
+            let connections = endpoint
+                .connection(fingerprint)
+                .context("clipboard peer is not trusted")?;
+            Ok((fingerprint.device_id(), connections))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let (stop, stopped) = oneshot::channel();
-    let mut worker = Desktop {
-        local: endpoint.fingerprint().device_id(),
-        peer: peer.device_id(),
-        files: config.files,
-        status,
-        approval,
-        decisions,
-        staging: Staging::default(),
-    };
+    let local = endpoint.fingerprint().device_id();
     // Native clipboard reads may wait on the owning application. Keep them off
     // the input and network runtime.
     std::thread::Builder::new()
@@ -72,20 +77,35 @@ pub fn start(
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_time()
                     .build()?;
-                let os = Clipboard::new()?;
-                if worker.files {
+                let os = Rc::new(Clipboard::new()?);
+                let mut paste = paste;
+                let mut staging = Staging::default();
+                if paste.is_some() {
                     match staging_directory() {
-                        Ok(directory) => worker.staging.directory = Some(directory),
+                        Ok(directory) => staging.directory = Some(directory),
                         Err(_) => {
-                            worker.files = false;
+                            paste = None;
                             warn!("file sharing disabled because the clipboard staging directory is unavailable");
                         }
                     }
                 }
-                runtime.block_on(async {
+                let worker = Rc::new(Desktop {
+                    local,
+                    status,
+                    approval,
+                    paste,
+                    staging: RefCell::new(staging),
+                    snapshot: RefCell::new(None),
+                    local_sequence: Cell::new(None),
+                    incoming: Cell::new(None),
+                    next_token: Cell::new(0),
+                    send_slot: Semaphore::new(1),
+                    peer_status: RefCell::new(vec![PeerStatus::default(); peers.len()]),
+                });
+                LocalSet::new().block_on(&runtime, async {
                     tokio::select! {
                         _ = stopped => Ok(()),
-                        result = worker.run(connections, &os) => result,
+                        result = worker.run(peers, decisions, os) => result,
                     }
                 })
             })();
@@ -98,60 +118,125 @@ pub fn start(
 
 struct Desktop {
     local: DeviceId,
-    peer: DeviceId,
-    files: bool,
     status: watch::Sender<ClipboardStatus>,
     approval: watch::Sender<Option<Approval>>,
-    decisions: mpsc::Receiver<ApprovalDecision>,
-    staging: Staging,
+    paste: Option<PasteRequests>,
+    staging: RefCell<Staging>,
+    snapshot: RefCell<Option<Rc<Snapshot>>>,
+    local_sequence: Cell<Option<u64>>,
+    incoming: Cell<Option<u64>>,
+    next_token: Cell<u64>,
+    send_slot: Semaphore,
+    peer_status: RefCell<Vec<PeerStatus>>,
+}
+
+type PeerConnection = watch::Receiver<Option<quinn::Connection>>;
+
+#[derive(Clone, Copy, Default)]
+struct PeerStatus {
+    connected: bool,
+    sequence: Option<u64>,
+    phase: Phase,
+    progress: Progress,
 }
 
 impl Desktop {
     async fn run(
-        mut self,
-        mut connections: watch::Receiver<Option<quinn::Connection>>,
-        os: &Clipboard,
+        self: Rc<Self>,
+        peers: Vec<(DeviceId, PeerConnection)>,
+        mut decisions: mpsc::Receiver<ApprovalDecision>,
+        os: Rc<Clipboard>,
     ) -> Result<()> {
-        let mut previous = None;
+        self.staging.borrow_mut().reconcile(&os);
+        let (routes, _) = broadcast::channel(8);
+        let mut links = JoinSet::new();
+        for (index, (peer, connections)) in peers.into_iter().enumerate() {
+            links.spawn_local(self.clone().run_peer(
+                index,
+                peer,
+                connections,
+                routes.subscribe(),
+                os.clone(),
+            ));
+        }
         let mut poll = interval(POLL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
-            let connection = tokio::select! {
-                ready = connections.wait_for(|value| value.as_ref().is_some_and(|conn| Some(conn.stable_id()) != previous)) => {
-                    ready?.clone().context("clipboard connection missing")?
+            tokio::select! {
+                Some(result) = links.join_next() => {
+                    result??;
+                    return Ok(());
                 }
+                Some(decision) = decisions.recv() => { let _ = routes.send(decision); }
                 _ = poll.tick() => {
-                    self.staging.reconcile(os);
-                    continue;
+                    let mut staging = self.staging.borrow_mut();
+                    if self.status.borrow().connected {
+                        staging.expire();
+                    } else {
+                        staging.reconcile(&os);
+                    }
                 }
-            };
+            }
+        }
+    }
+
+    async fn run_peer(
+        self: Rc<Self>,
+        index: usize,
+        peer: DeviceId,
+        mut connections: PeerConnection,
+        mut decisions: broadcast::Receiver<ApprovalDecision>,
+        os: Rc<Clipboard>,
+    ) -> Result<()> {
+        let mut previous = None;
+        loop {
+            let connection = connections
+                .wait_for(|value| {
+                    value
+                        .as_ref()
+                        .is_some_and(|conn| Some(conn.stable_id()) != previous)
+                })
+                .await?
+                .clone()
+                .context("clipboard connection missing")?;
             previous = Some(connection.stable_id());
-            if self.session(connection, os).await.is_err() {
+            if self
+                .session(index, peer, connection, &os, &mut decisions)
+                .await
+                .is_err()
+            {
                 debug!("clipboard session ended");
             }
-            self.approval.send_replace(None);
-            self.status.send_modify(|status| {
-                status.connected = false;
-                for phase in [&mut status.outgoing, &mut status.incoming] {
-                    *phase = if matches!(*phase, Phase::Copying | Phase::Waiting) {
-                        Phase::Failed
-                    } else {
-                        Phase::Idle
-                    };
+            self.update_peer(index, |state| {
+                state.connected = false;
+                if matches!(
+                    state.phase,
+                    Phase::Offered | Phase::Waiting | Phase::Copying
+                ) {
+                    state.phase = Phase::Failed;
                 }
             });
         }
     }
 
-    async fn session(&mut self, connection: quinn::Connection, os: &Clipboard) -> Result<()> {
-        let (send, recv, files) = timeout(HANDSHAKE, handshake(&connection, self.files)).await??;
+    async fn session(
+        self: &Rc<Self>,
+        index: usize,
+        peer: DeviceId,
+        connection: quinn::Connection,
+        os: &Clipboard,
+        decisions: &mut broadcast::Receiver<ApprovalDecision>,
+    ) -> Result<()> {
+        let (send, recv, files) =
+            timeout(HANDSHAKE, handshake(&connection, self.paste.is_some())).await??;
         let (control, outgoing) = mpsc::channel(16);
         let (incoming, events) = mpsc::channel(16);
-        self.staging.reconcile(os);
         let sequence = os.sequence()?;
         let mut link = Link {
-            revisions: Revisions::new(self.local, self.peer),
-            desktop: self,
+            revisions: Revisions::new(self.local, peer),
+            desktop: self.clone(),
+            index,
+            peer,
             connection,
             control,
             os,
@@ -164,17 +249,118 @@ impl Desktop {
             receive_job: None,
             available: os.available(),
         };
-        link.desktop.status.send_replace(ClipboardStatus {
-            connected: true,
-            ..ClipboardStatus::default()
+        self.update_peer(index, |state| {
+            *state = PeerStatus {
+                connected: true,
+                ..PeerStatus::default()
+            }
         });
         info!("clipboard sync connected");
         tokio::try_join!(
             write_controls(send, outgoing),
             read_controls(recv, incoming),
-            link.run(events)
+            link.run(events, decisions)
         )?;
         Ok(())
+    }
+
+    fn update_peer(&self, index: usize, update: impl FnOnce(&mut PeerStatus)) {
+        let mut states = self.peer_status.borrow_mut();
+        update(&mut states[index]);
+        let connected = states.iter().any(|state| state.connected);
+        let best = states
+            .iter()
+            .filter(|state| state.sequence == self.local_sequence.get())
+            .max_by_key(|state| (outgoing_rank(state.phase), state.progress.bytes))
+            .copied()
+            .unwrap_or_default();
+        self.status.send_modify(|status| {
+            status.connected = connected;
+            status.outgoing = best.phase;
+            status.sent = best.progress;
+        });
+    }
+
+    fn snapshot(&self, os: &Clipboard, previous: u64) -> Option<Rc<Snapshot>> {
+        let sequence = os.sequence().ok()?;
+        if sequence == previous {
+            return None;
+        }
+        let mut cache = self.snapshot.borrow_mut();
+        if let Some(snapshot) = cache
+            .as_ref()
+            .filter(|snapshot| snapshot.sequence == sequence)
+        {
+            return Some(snapshot.clone());
+        }
+        *cache = Some(Rc::new(os.read(previous).ok()??));
+        cache.clone()
+    }
+
+    fn local_copy(&self, sequence: u64) {
+        if self.local_sequence.replace(Some(sequence)) != Some(sequence) {
+            self.staging.borrow_mut().publish(None, sequence);
+            if let Some(token) = self.incoming.get() {
+                self.end_incoming(token, Phase::Idle);
+            }
+            self.status
+                .send_modify(|status| status.incoming = Phase::Idle);
+        }
+    }
+
+    fn paste_requested(&self, token: u64) -> bool {
+        self.paste
+            .as_ref()
+            .is_some_and(|paste| paste.requested(token))
+    }
+
+    fn select_incoming(&self, phase: Phase, total: u64) -> Option<u64> {
+        if let Some(token) = self.incoming.get() {
+            if matches!(
+                self.status.borrow().incoming,
+                Phase::Waiting | Phase::Copying
+            ) || self
+                .paste
+                .as_ref()
+                .is_some_and(|paste| !paste.clear_unrequested(token))
+            {
+                return None;
+            }
+            self.end_incoming(token, Phase::Idle);
+        }
+        let token = self.next_token.get().wrapping_add(1);
+        self.next_token.set(token);
+        self.incoming.set(Some(token));
+        self.status.send_modify(|status| {
+            status.received = Progress { bytes: 0, total };
+            status.incoming = phase;
+        });
+        Some(token)
+    }
+
+    fn end_incoming(&self, token: u64, phase: Phase) {
+        if self.incoming.get() == Some(token) {
+            self.incoming.set(None);
+            if let Some(paste) = &self.paste {
+                paste.clear(token);
+            }
+            self.approval.send_replace(None);
+            self.status.send_modify(|status| status.incoming = phase);
+        }
+    }
+}
+
+fn outgoing_rank(phase: Phase) -> u8 {
+    match phase {
+        Phase::Copying => 8,
+        Phase::Waiting => 7,
+        Phase::Ready => 6,
+        Phase::Offered => 5,
+        Phase::TooLarge => 4,
+        Phase::Declined => 3,
+        Phase::Failed => 2,
+        Phase::Skipped => 1,
+        Phase::Idle => 0,
     }
 }
 
@@ -223,10 +409,31 @@ struct Outgoing {
     id: NonZeroU64,
     prepared: Option<Prepared>,
     deadline: Instant,
+    awaiting_request: bool,
+}
+
+impl Outgoing {
+    fn request(&mut self, id: NonZeroU64, now: Instant) -> bool {
+        if self.id != id || !self.awaiting_request || self.deadline <= now {
+            return false;
+        }
+        self.awaiting_request = false;
+        self.deadline = now + APPROVAL + HANDSHAKE;
+        true
+    }
+
+    fn decision(&mut self, id: NonZeroU64, accept: bool, now: Instant) -> Option<Prepared> {
+        if self.id != id || self.deadline <= now || (accept && self.awaiting_request) {
+            return None;
+        }
+        self.prepared.take()
+    }
 }
 
 struct Incoming {
     offer: Offer,
+    token: u64,
+    sequence: u64,
     deadline: Instant,
     accepted: bool,
     prompt: Option<Prompt>,
@@ -234,7 +441,9 @@ struct Incoming {
 }
 
 struct Link<'a> {
-    desktop: &'a mut Desktop,
+    desktop: Rc<Desktop>,
+    index: usize,
+    peer: DeviceId,
     os: &'a Clipboard,
     files: bool,
     connection: quinn::Connection,
@@ -250,7 +459,11 @@ struct Link<'a> {
 }
 
 impl Link<'_> {
-    async fn run(&mut self, mut events: mpsc::Receiver<Control>) -> Result<()> {
+    async fn run(
+        &mut self,
+        mut events: mpsc::Receiver<Control>,
+        decisions: &mut broadcast::Receiver<ApprovalDecision>,
+    ) -> Result<()> {
         let mut poll = interval(POLL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
@@ -261,8 +474,8 @@ impl Link<'_> {
                     self.read_clipboard()?;
                     self.control_received(message)?;
                 }
-                decision = self.desktop.decisions.recv() => {
-                    if let Some(decision) = decision {
+                decision = decisions.recv() => {
+                    if let Ok(decision) = decision {
                         self.read_clipboard()?;
                         self.decide(decision)?;
                     }
@@ -293,10 +506,21 @@ impl Link<'_> {
                 }
                 _ = poll.tick() => {
                     self.read_clipboard()?;
-                    self.desktop.staging.expire();
                     let now = Instant::now();
                     if self.incoming.as_ref().is_some_and(|item| item.deadline <= now) {
                         self.finish_incoming(Phase::Failed, true)?;
+                    }
+                    if let Some(incoming) = self.incoming.as_ref()
+                        && incoming.offer.layout.is_file()
+                        && incoming.prompt.is_none()
+                        && !incoming.accepted
+                        && self.desktop.paste_requested(incoming.token)
+                    {
+                        if self.os.sequence()? == incoming.sequence {
+                            self.show_prompt()?;
+                        } else {
+                            self.finish_incoming(Phase::Failed, true)?;
+                        }
                     }
                     if self.out.as_ref().is_some_and(|item| item.deadline <= now) {
                         self.withdraw(Phase::Failed)?;
@@ -304,7 +528,19 @@ impl Link<'_> {
                     self.apply()?;
                 }
             }
+            if self.incoming.as_ref().is_some_and(|item| !self.owns(item)) {
+                self.finish_incoming(Phase::Failed, true)?;
+            }
         }
+    }
+
+    fn owns(&self, item: &Incoming) -> bool {
+        self.desktop.incoming.get() == Some(item.token)
+    }
+
+    fn outgoing_phase(&self, phase: Phase) {
+        self.desktop
+            .update_peer(self.index, |status| status.phase = phase);
     }
 
     fn tell(&self, control: Control) -> Result<()> {
@@ -316,25 +552,36 @@ impl Link<'_> {
     fn control_received(&mut self, control: Control) -> Result<()> {
         match control {
             Control::Offer(offer) => self.offer(offer),
+            Control::Request(id) => {
+                if self
+                    .out
+                    .as_mut()
+                    .is_some_and(|item| item.request(id, Instant::now()))
+                {
+                    self.outgoing_phase(Phase::Waiting);
+                }
+                Ok(())
+            }
             Control::Decision { id, accept } => {
-                let Some(out) = self.out.as_mut().filter(|item| item.id == id) else {
+                let Some(out) = self.out.as_mut() else {
                     return Ok(());
                 };
-                let Some(prepared) = out.prepared.take() else {
+                let now = Instant::now();
+                let Some(prepared) = out.decision(id, accept, now) else {
                     return Ok(());
                 };
                 if !accept {
                     self.out = None;
-                    self.desktop
-                        .status
-                        .send_modify(|s| s.outgoing = Phase::Declined);
+                    self.outgoing_phase(Phase::Declined);
                     return Ok(());
                 }
-                out.deadline = Instant::now() + IN_FLIGHT;
+                out.deadline = now + IN_FLIGHT;
                 let connection = self.connection.clone();
-                let status = self.desktop.status.clone();
-                status.send_modify(|s| s.outgoing = Phase::Copying);
+                let desktop = self.desktop.clone();
+                let index = self.index;
+                self.outgoing_phase(Phase::Copying);
                 self.send_job = Some(Box::pin(async move {
+                    let _slot = desktop.send_slot.acquire().await?;
                     let mut send = timeout(HANDSHAKE, connection.open_uni()).await??;
                     send.set_priority(-1)?;
                     timeout(HANDSHAKE, async {
@@ -343,7 +590,7 @@ impl Link<'_> {
                     })
                     .await??;
                     transfer::send(&mut send, prepared, |bytes| {
-                        status.send_modify(|s| s.sent.bytes = bytes);
+                        desktop.update_peer(index, |s| s.progress.bytes = bytes);
                     })
                     .await?;
                     send.finish()?;
@@ -359,9 +606,7 @@ impl Link<'_> {
                 {
                     self.out = None;
                     self.send_job = None;
-                    self.desktop.status.send_modify(|s| {
-                        s.outgoing = if applied { Phase::Ready } else { Phase::Failed }
-                    });
+                    self.outgoing_phase(if applied { Phase::Ready } else { Phase::Failed });
                 }
                 Ok(())
             }
@@ -380,14 +625,15 @@ impl Link<'_> {
 
     fn offer(&mut self, offer: Offer) -> Result<()> {
         ensure!(
-            offer.revision.origin == self.desktop.peer,
+            offer.revision.origin == self.peer,
             "clipboard offer origin mismatch"
         );
         let id = offer.revision.counter;
         let total = offer.layout.total()?;
         let requires_approval = offer.layout.requires_approval()?;
+        let file = offer.layout.is_file();
         if !self.available
-            || (matches!(offer.layout, Layout::Files(_)) && !self.files)
+            || (file && !self.files)
             || !self.revisions.is_new_remote(offer.revision)
             || self.newest.is_some_and(|previous| previous >= id)
         {
@@ -395,41 +641,65 @@ impl Link<'_> {
         }
         self.newest = Some(id);
         self.finish_incoming(Phase::Failed, true)?;
-        let mut incoming = Incoming {
+        let phase = if file {
+            Phase::Offered
+        } else if requires_approval {
+            Phase::Waiting
+        } else {
+            Phase::Copying
+        };
+        let Some(token) = self.desktop.select_incoming(phase, total) else {
+            return self.tell(Control::Decision { id, accept: false });
+        };
+        let deadline = Instant::now() + if file { FILE_OFFER } else { APPROVAL };
+        self.incoming = Some(Incoming {
             offer,
-            deadline: Instant::now() + APPROVAL,
+            token,
+            sequence: self.sequence,
+            deadline,
             accepted: false,
             ready: None,
             prompt: None,
+        });
+        if file {
+            if let Some(paste) = &self.desktop.paste {
+                paste.arm(token, self.sequence, deadline.into_std());
+            }
+        } else if requires_approval {
+            self.show_prompt()?;
+        } else {
+            self.accept()?;
+        }
+        Ok(())
+    }
+
+    fn show_prompt(&mut self) -> Result<()> {
+        let Some(incoming) = self.incoming.as_mut() else {
+            return Ok(());
         };
-        if requires_approval {
-            let approval = make_approval(&incoming.offer.layout, total)?;
-            self.desktop.approval.send_replace(Some(approval.clone()));
-            match Prompt::launch(approval.id) {
-                Ok(prompt) => incoming.prompt = Some(prompt),
-                Err(_) => {
-                    self.desktop.approval.send_replace(None);
-                    self.desktop
-                        .status
-                        .send_modify(|s| s.incoming = Phase::Failed);
-                    warn!(
-                        "could not open clipboard approval prompt; build the UniKVM CLI beside the agent"
-                    );
-                    return self.tell(Control::Decision { id, accept: false });
-                }
+        let approval = make_approval(&incoming.offer.layout, incoming.offer.layout.total()?)?;
+        let approval_id = approval.id;
+        self.desktop.approval.send_replace(Some(approval));
+        match Prompt::launch(approval_id) {
+            Ok(prompt) => incoming.prompt = Some(prompt),
+            Err(_) => {
+                warn!(
+                    "could not open clipboard approval prompt; build the UniKVM CLI beside the agent"
+                );
+                return self.finish_incoming(Phase::Failed, true);
             }
         }
-        self.desktop.status.send_modify(|s| {
-            s.received = Progress { bytes: 0, total };
-            s.incoming = if requires_approval {
-                Phase::Waiting
-            } else {
-                Phase::Copying
-            };
-        });
-        self.incoming = Some(incoming);
-        if !requires_approval {
-            self.accept()?;
+        incoming.deadline = Instant::now() + APPROVAL;
+        let file_request = incoming
+            .offer
+            .layout
+            .is_file()
+            .then_some(incoming.offer.revision.counter);
+        self.desktop
+            .status
+            .send_modify(|s| s.incoming = Phase::Waiting);
+        if let Some(id) = file_request {
+            self.tell(Control::Request(id))?;
         }
         Ok(())
     }
@@ -441,14 +711,19 @@ impl Link<'_> {
             .borrow()
             .as_ref()
             .is_some_and(|offer| offer.id == decision.id)
-            || !self
-                .incoming
-                .as_ref()
-                .is_some_and(|incoming| !incoming.accepted && incoming.deadline > Instant::now())
+            || !self.incoming.as_ref().is_some_and(|incoming| {
+                self.owns(incoming)
+                    && incoming.prompt.is_some()
+                    && !incoming.accepted
+                    && incoming.deadline > Instant::now()
+            })
         {
             return Ok(());
         }
         if decision.accept {
+            if self.incoming.as_ref().map(|incoming| incoming.sequence) != self.os.sequence().ok() {
+                return self.finish_incoming(Phase::Failed, true);
+            }
             self.accept()
         } else {
             self.finish_incoming(Phase::Declined, true)
@@ -474,7 +749,7 @@ impl Link<'_> {
         let Some(incoming) = self
             .incoming
             .as_ref()
-            .filter(|item| item.accepted && item.ready.is_none())
+            .filter(|item| self.owns(item) && item.accepted && item.ready.is_none())
         else {
             let _ = receive.stop(0u32.into());
             return;
@@ -486,7 +761,7 @@ impl Link<'_> {
         let id = incoming.offer.revision.counter;
         let layout = incoming.offer.layout.clone();
         let status = self.desktop.status.clone();
-        let directory = self.desktop.staging.directory.clone();
+        let directory = self.desktop.staging.borrow().directory.clone();
         self.receive_job = Some(Box::pin(async move {
             let mut header = [0; DATA.len()];
             timeout(HANDSHAKE, receive.read_exact(&mut header)).await??;
@@ -516,30 +791,26 @@ impl Link<'_> {
         }
         if !self.available {
             self.available = true;
-            self.desktop.staging.reconcile(self.os);
             self.sequence = self.os.sequence()?;
             return Ok(());
         }
-        let Ok(Some(snapshot)) = self.os.read(self.sequence) else {
+        let Some(snapshot) = self.desktop.snapshot(self.os, self.sequence) else {
             return Ok(());
         };
         self.sequence = snapshot.sequence;
         if snapshot.imported {
-            self.desktop.staging.sequence = snapshot.sequence;
             return Ok(());
         }
-        self.desktop.staging.publish(None, snapshot.sequence);
+        self.desktop.local_copy(snapshot.sequence);
         self.finish_incoming(Phase::Failed, true)?;
         self.withdraw(Phase::Skipped)?;
         let revision = self.revisions.local_change_after(self.newest)?;
-        self.desktop.status.send_modify(|s| {
-            s.outgoing = Phase::Skipped;
-            s.sent = Progress::default();
-            if s.incoming == Phase::Ready {
-                s.incoming = Phase::Idle;
-            }
+        self.desktop.update_peer(self.index, |s| {
+            s.sequence = Some(snapshot.sequence);
+            s.phase = Phase::Skipped;
+            s.progress = Progress::default();
         });
-        let Some(content) = snapshot.content else {
+        let Some(content) = snapshot.content.clone() else {
             return Ok(());
         };
         if !self.os.available() || (matches!(content, Content::Files(_)) && !self.files) {
@@ -549,15 +820,14 @@ impl Link<'_> {
             Ok(prepared) => prepared,
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::FileTooLarge {
-                    self.desktop
-                        .status
-                        .send_modify(|s| s.outgoing = Phase::TooLarge);
+                    self.outgoing_phase(Phase::TooLarge);
                 }
                 return Ok(());
             }
         };
         let total = prepared.layout.total()?;
         let requires_approval = prepared.layout.requires_approval()?;
+        let file = prepared.layout.is_file();
         self.tell(Control::Offer(Offer {
             revision,
             layout: prepared.layout.clone(),
@@ -565,15 +835,18 @@ impl Link<'_> {
         self.out = Some(Outgoing {
             id: revision.counter,
             prepared: Some(prepared),
-            deadline: Instant::now() + APPROVAL + HANDSHAKE,
+            deadline: Instant::now() + if file { FILE_OFFER } else { APPROVAL } + HANDSHAKE,
+            awaiting_request: file,
         });
-        self.desktop.status.send_modify(|s| {
-            s.outgoing = if requires_approval {
+        self.desktop.update_peer(self.index, |s| {
+            s.phase = if file {
+                Phase::Offered
+            } else if requires_approval {
                 Phase::Waiting
             } else {
                 Phase::Copying
             };
-            s.sent = Progress { bytes: 0, total };
+            s.progress = Progress { bytes: 0, total };
         });
         Ok(())
     }
@@ -585,14 +858,17 @@ impl Link<'_> {
         let Some(data) = incoming.ready.as_ref() else {
             return Ok(());
         };
-        if !self.available || !self.revisions.is_new_remote(incoming.offer.revision) {
+        if self.desktop.incoming.get() != Some(incoming.token)
+            || !self.available
+            || !self.revisions.is_new_remote(incoming.offer.revision)
+        {
             return self.finish_incoming(Phase::Failed, true);
         }
-        match self.os.write(self.sequence, &data.content) {
+        match self.os.write(incoming.sequence, &data.content) {
             Ok(WriteOutcome::Applied(sequence)) => {
                 self.sequence = sequence;
                 self.revisions.accept_remote(incoming.offer.revision);
-                self.desktop.staging.publish(
+                self.desktop.staging.borrow_mut().publish(
                     incoming
                         .ready
                         .take()
@@ -611,8 +887,7 @@ impl Link<'_> {
     fn finish_incoming(&mut self, phase: Phase, notify: bool) -> Result<()> {
         if let Some(item) = self.incoming.take() {
             self.receive_job = None;
-            self.desktop.approval.send_replace(None);
-            self.desktop.status.send_modify(|s| s.incoming = phase);
+            self.desktop.end_incoming(item.token, phase);
             if notify {
                 let id = item.offer.revision.counter;
                 let reply = if item.accepted {
@@ -632,10 +907,18 @@ impl Link<'_> {
     fn withdraw(&mut self, phase: Phase) -> Result<()> {
         if let Some(item) = self.out.take() {
             self.send_job = None;
-            self.desktop.status.send_modify(|s| s.outgoing = phase);
+            self.outgoing_phase(phase);
             self.tell(Control::Withdraw(item.id))?;
         }
         Ok(())
+    }
+}
+
+impl Drop for Link<'_> {
+    fn drop(&mut self) {
+        if let Some(incoming) = &self.incoming {
+            self.desktop.end_incoming(incoming.token, Phase::Failed);
+        }
     }
 }
 
@@ -643,5 +926,49 @@ async fn poll_job<T>(job: &mut Option<Job<T>>) -> Result<T> {
     match job {
         Some(job) => job.await,
         None => pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_decision_is_bound_to_the_request_on_each_peer() {
+        let now = Instant::now();
+        let id = NonZeroU64::MIN;
+        let wrong_id = NonZeroU64::new(2).unwrap();
+        let pending = || {
+            let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+            Outgoing {
+                id,
+                prepared: Some(Prepared::new(Content::Files(vec![fixture]), open_source).unwrap()),
+                deadline: now + FILE_OFFER,
+                awaiting_request: true,
+            }
+        };
+
+        let mut first = pending();
+        let mut second = pending();
+        assert!(first.decision(id, true, now).is_none());
+        assert!(!first.request(wrong_id, now));
+        assert!(first.request(id, now));
+        assert!(!first.request(id, now + APPROVAL));
+        assert!(first.decision(wrong_id, true, now).is_none());
+        assert!(first.decision(id, true, now).is_some());
+        assert!(first.decision(id, true, now).is_none());
+        assert!(second.decision(id, true, now).is_none());
+        assert!(second.prepared.is_some());
+        assert!(second.decision(id, false, now).is_some());
+
+        let mut expired = pending();
+        assert!(!expired.request(id, now + FILE_OFFER));
+        let mut unanswered = pending();
+        assert!(unanswered.request(id, now));
+        assert!(
+            unanswered
+                .decision(id, true, now + APPROVAL + HANDSHAKE)
+                .is_none()
+        );
     }
 }

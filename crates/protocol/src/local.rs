@@ -29,6 +29,7 @@ pub enum ClipboardPhase {
     Waiting,
     TooLarge,
     Declined,
+    Offered,
 }
 
 impl ClipboardPhase {
@@ -42,6 +43,7 @@ impl ClipboardPhase {
             5 => Ok(Self::Waiting),
             6 => Ok(Self::TooLarge),
             7 => Ok(Self::Declined),
+            8 => Ok(Self::Offered),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid clipboard status",
@@ -293,7 +295,7 @@ mod tests {
         let (mut client, mut server) = duplex(5);
         let expected = ClipboardStatus {
             connected: true,
-            outgoing: ClipboardPhase::Copying,
+            outgoing: ClipboardPhase::Offered,
             incoming: ClipboardPhase::Ready,
             ..ClipboardStatus::default()
         };

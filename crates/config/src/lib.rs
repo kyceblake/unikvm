@@ -35,9 +35,20 @@ pub struct Config {
 #[derive(Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClipboardConfig {
-    pub peer_fingerprint: String,
+    peer_fingerprint: Option<String>,
+    #[serde(default)]
+    peer_fingerprints: Vec<String>,
     #[serde(default)]
     pub files: bool,
+}
+
+impl ClipboardConfig {
+    pub fn peers(&self) -> impl Iterator<Item = &str> {
+        self.peer_fingerprint
+            .iter()
+            .chain(&self.peer_fingerprints)
+            .map(String::as_str)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -124,7 +135,9 @@ pub enum ConfigError {
     DiscoveryAddress,
     #[error("input.peer_fingerprint must identify a peer already trusted in [network]")]
     InputPeer,
-    #[error("clipboard.peer_fingerprint must identify a peer already trusted in [network]")]
+    #[error(
+        "set clipboard.peer_fingerprint or clipboard.peer_fingerprints to distinct peers trusted in [network]"
+    )]
     ClipboardPeer,
     #[error("input.peer_side requires bidirectional input mode")]
     InputLayout,
@@ -223,11 +236,14 @@ impl Config {
         {
             return Err(ConfigError::InputPeer);
         }
-        if config
-            .clipboard
-            .as_ref()
-            .is_some_and(|clipboard| !trusted(&clipboard.peer_fingerprint))
-        {
+        if config.clipboard.as_ref().is_some_and(|clipboard| {
+            let mut seen = std::collections::HashSet::new();
+            (clipboard.peer_fingerprint.is_some() && !clipboard.peer_fingerprints.is_empty())
+                || clipboard
+                    .peers()
+                    .any(|peer| !trusted(peer) || !seen.insert(peer.to_ascii_lowercase()))
+                || seen.is_empty()
+        }) {
             return Err(ConfigError::ClipboardPeer);
         }
         Ok(config)
@@ -333,6 +349,43 @@ peer_fingerprint = 'AB'
             Config::parse(&enabled.replace("'ab'", "'cd'")),
             Err(ConfigError::ClipboardPeer)
         ));
+    }
+
+    #[test]
+    fn clipboard_peer_list_requires_distinct_trusted_peers() {
+        let network = r#"
+schema_version = 1
+[network]
+listen = '127.0.0.1:24800'
+identity = 'identity.bin'
+[[network.peers]]
+address = '127.0.0.1:24801'
+certificate = 'one.der'
+fingerprint = 'AB'
+[[network.peers]]
+address = '127.0.0.1:24802'
+certificate = 'two.der'
+fingerprint = 'CD'
+[clipboard]
+files = true
+"#;
+        let config = Config::parse(&format!("{network}peer_fingerprints = ['ab', 'CD']")).unwrap();
+        assert_eq!(
+            config.clipboard.unwrap().peers().collect::<Vec<_>>(),
+            ["ab", "CD"]
+        );
+        for setting in [
+            "",
+            "peer_fingerprints = []",
+            "peer_fingerprints = ['ab', 'ef']",
+            "peer_fingerprints = ['ab', 'AB']",
+            "peer_fingerprint = 'ab'\npeer_fingerprints = ['CD']",
+        ] {
+            assert!(matches!(
+                Config::parse(&format!("{network}{setting}")),
+                Err(ConfigError::ClipboardPeer)
+            ));
+        }
     }
 
     #[test]
