@@ -10,7 +10,7 @@ use objc2_app_kit::{
     NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF, NSPasteboardWriting,
 };
 use objc2_foundation::{NSArray, NSData, NSString};
-use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BYTES};
+use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_TEXT_BYTES};
 
 use super::{Snapshot, WriteOutcome, imaging};
 
@@ -78,7 +78,8 @@ impl Clipboard {
                 ];
                 // Use a single explicit raster representation. Auxiliary items
                 // and a plain URL or caption do not take precedence over pixels.
-                for item in items.iter().take(MAX_PASTEBOARD_ITEMS) {
+                for index in 0..items.len().min(MAX_PASTEBOARD_ITEMS) {
+                    let item = items.objectAtIndex(index);
                     let types = item.types();
                     let png = formats
                         .iter()

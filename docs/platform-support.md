@@ -8,6 +8,8 @@ Runtime verification was performed on Windows 11 Pro build 26300 in an ordinary 
 
 The Windows operator ran the physical suppression probe. It recorded two blocked F9 events, zero downstream F9 events, physical mouse movement, and successful Ctrl+Shift+F10 delivery.
 
+The native clipboard window showed the active clipboard session on Windows using the paired Mac. The AppKit window passed Apple Silicon cross-target Clippy. Its appearance and behavior still need a Mac desktop test. The native monitor is available on Windows and macOS. [Clipboard monitor instructions](clipboard-sync.md#watch-clipboard-progress)
+
 | Desktop | Capture and suppression | Injection | Hotkeys and edge handling | Permissions and verification |
 | --- | --- | --- | --- | --- |
 | Windows | Low-level keyboard and mouse hooks on a message-pump thread. Verified physical F9 suppression and tagged synthetic event filtering. | `SendInput` with injection flags and extra-info marker verified for F24 press/release and relative mouse move. | Ctrl+Shift+F10 delivery verified in the physical probe. `SetCursorPos` reached two pixels at a monitor's right edge. Ordinary cross-monitor motion still needs testing. | Opening the input desktop and comparing it with the current thread desktop passed. UIPI blocks injection into higher-integrity apps. Secure desktops, protected targets, mixed DPI, and default Win-key bindings still need testing. |

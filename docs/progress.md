@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-14 — Native clipboard monitor
+
+- Replaced the browser monitor with a native Win32 window and an AppKit window. Run `unikvm clipboard` in the same desktop session as the agent. The CLI reads existing clipboard v4 status through local IPC.
+- Windows formatting, strict Clippy, workspace build, and all 61 standard tests passed. The native window displayed the paired Mac connection through the running Windows agent. Apple Silicon and Linux cross-target Clippy passed, along with Cargo deny. The Apple check also caught and verified a fix for the existing macOS pasteboard array iteration.
+- Next, open the monitor on the Mac and verify animation and paste readiness in both directions with a large image. [Clipboard monitor instructions](clipboard-sync.md#watch-clipboard-progress)
+
 ## 2026-11-14 — Clipboard progress monitor
 
 - Added `unikvm clipboard` for Windows and macOS. The local browser panel shows incoming and outgoing activity, skipped entries, and confirmation from the destination. Clipboard protocol v4 adds a receipt tied to each update. The receiver sends success after writing to the native clipboard.

@@ -14,9 +14,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-ring.workspace = true
-tiny_http.workspace = true
 unikvm-network.workspace = true
-unikvm-platform.workspace = true
+unikvm-platform = { workspace = true, features = ["clipboard-monitor"] }
 unikvm-protocol.workspace = true
 tokio.workspace = true

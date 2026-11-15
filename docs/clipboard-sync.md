@@ -25,6 +25,6 @@ On either desktop, run this in a separate terminal while the agent is running.
 cargo run --locked -p unikvm-cli -- clipboard
 ```
 
-UniKVM opens a local browser panel with separate rows for outgoing and incoming copies. The bar moves while a copy is pending. Quick copies may go straight to the result. **Ready to paste here** means the agent successfully wrote to this computer’s clipboard. The sender shows **Ready to paste on the other computer** after it receives confirmation. **This clipboard entry was skipped** can appear for copies such as Finder file references, unsupported formats, or privacy-marked items.
+The command opens a native desktop window with separate rows for outgoing and incoming copies. The bar moves while a copy is pending. Quick copies may go straight to the result. **Ready to paste here** means the agent successfully wrote to this computer’s clipboard. The sender shows **Ready to paste on the other computer** after it receives confirmation. **This clipboard entry was skipped** can appear for copies such as Finder file references, unsupported formats, or privacy-marked items.
 
-To check both directions, open the panel on each machine, copy a large image from Preview or a Windows image editor, and wait for **Ready to paste here** before pasting. Repeat from the other machine. Close the monitor with Ctrl+C in its terminal. Use `clipboard --no-open` to print the local URL and open it manually.
+To check both directions, open the monitor on each machine, copy a large image from Preview or a Windows image editor, and wait for **Ready to paste here** before pasting. Repeat from the other machine. Close the window when you’re done. The agents continue sharing the clipboard.

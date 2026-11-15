@@ -6,7 +6,7 @@ The agent exposes read-only health and clipboard progress queries over native lo
 - Linux and macOS use a socket in a user-owned mode-0700 directory. Both endpoints compare effective user IDs using native peer credentials. A lock serializes binding, stale socket removal, and shutdown cleanup. The fallback under `/tmp` can be precreated by another local user, resulting in a startup failure. The ownership check fails closed. [Tokio peer credential implementation](https://docs.rs/tokio/latest/src/tokio/net/unix/ucred.rs.html)
 - The agent bounds each exchange by time and frame size. A stalled local client can delay other local requests for up to one exchange deadline per connection. Processes with the same user or logon rights and OS administrators are inside the local trust boundary.
 
-The optional browser monitor runs in the CLI on an ephemeral IPv4 loopback port. Its private URL uses a random 128-bit token and the server checks the loopback Host header. It serves a static page and read-only clipboard states without clipboard contents, peer identities, or shared configuration. Responses prohibit caching and referrer forwarding.
+The native clipboard monitor runs separately from the agent and reads transfer states through the same user-scoped IPC. It displays no clipboard contents, peer identities, or shared configuration.
 
 ## Manual peer trust
 

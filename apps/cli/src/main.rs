@@ -24,14 +24,7 @@ fn run() -> Result<()> {
     let command = args.next();
     match command.as_deref().and_then(|arg| arg.to_str()) {
         Some("status") if args.next().is_none() => {}
-        Some("clipboard") => {
-            let option = args.next();
-            return match (option.as_deref().and_then(|arg| arg.to_str()), args.next()) {
-                (None, None) if option.is_none() => clipboard::open(true),
-                (Some("--no-open"), None) => clipboard::open(false),
-                _ => bail!(USAGE),
-            };
-        }
+        Some("clipboard") if args.next().is_none() => return clipboard::open(),
         Some("identity") => return identity_command(args),
         Some("peer") => return verify_command(args),
         Some("-h" | "--help") if args.next().is_none() => {

@@ -48,7 +48,7 @@ Phase 4 uses Tokio byte I/O and native clipboard adapters. Windows reuses `windo
 
 ## Adopted for the clipboard monitor
 
-[tiny_http 0.12.0](https://crates.io/crates/tiny_http/0.12.0) is licensed MIT OR Apache-2.0 and has no declared MSRV. The stable release is older, so use its existing no-default-feature synchronous HTTP API only in the CLI, for a loopback listener and fixed routes. Reuse ring's system random source for the private URL. The agent continues to expose progress through native local IPC. [tiny_http server API](https://tiny-http.github.io/tiny-http/tiny_http/struct.Server.html)
+The native monitor uses the existing `windows-sys` 0.61.2 bindings for a Win32 window, standard text controls, and painting. On macOS it enables window, text, progress indicator, and timer APIs in the existing `objc2-app-kit` and `objc2-foundation` 0.3.2 bindings. These features pull in `objc2-core-foundation` 0.3.2 and resolve optional `dispatch2` 0.3.1 in the lockfile. Both declare Rust 1.71 and Zlib OR Apache-2.0 OR MIT. The CLI reads transfer status through native local IPC. [Win32 window management](https://learn.microsoft.com/en-us/windows/win32/winmsg/windows), [AppKit bindings](https://docs.rs/objc2-app-kit/0.3.2/objc2_app_kit/), [Core Foundation bindings](https://crates.io/crates/objc2-core-foundation/0.3.2), [Grand Central Dispatch bindings](https://crates.io/crates/dispatch2/0.3.1)
 
 ## Reviewed for later milestones
 

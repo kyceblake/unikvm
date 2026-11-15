@@ -3,6 +3,12 @@
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub mod clipboard;
 
+#[cfg(all(
+    feature = "clipboard-monitor",
+    any(target_os = "macos", target_os = "windows")
+))]
+pub mod clipboard_monitor;
+
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub mod local;
 

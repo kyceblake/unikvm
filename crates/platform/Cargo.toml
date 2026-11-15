@@ -8,6 +8,26 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+clipboard-monitor = [
+    "objc2-app-kit/NSApplication",
+    "objc2-app-kit/NSColor",
+    "objc2-app-kit/NSControl",
+    "objc2-app-kit/NSFont",
+    "objc2-app-kit/NSGraphics",
+    "objc2-app-kit/NSProgressIndicator",
+    "objc2-app-kit/NSResponder",
+    "objc2-app-kit/NSRunningApplication",
+    "objc2-app-kit/NSTextField",
+    "objc2-app-kit/NSView",
+    "objc2-app-kit/NSWindow",
+    "objc2-app-kit/objc2-core-foundation",
+    "objc2-foundation/NSDate",
+    "objc2-foundation/NSGeometry",
+    "objc2-foundation/NSNotification",
+    "objc2-foundation/NSTimer",
+]
+
 [dependencies]
 tempfile.workspace = true
 tokio.workspace = true
