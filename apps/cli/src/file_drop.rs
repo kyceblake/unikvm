@@ -1,4 +1,4 @@
-//! Desktop helper for the Explorer receiver. OLE runs on this process's UI thread.
+//! Desktop helpers for native file drags. OLE and AppKit run on their platform UI threads.
 
 use std::ffi::OsString;
 #[cfg(target_os = "windows")]
@@ -140,20 +140,23 @@ async fn receive_path(id: u64, delivery: &mut Delivery) -> Result<PathBuf> {
     Ok(path)
 }
 
-#[cfg(target_os = "macos")]
 pub(super) fn source(mut args: impl Iterator<Item = OsString>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    use unikvm_platform::file_drag_source::observe;
+    #[cfg(target_os = "windows")]
+    use unikvm_platform::file_drop::observe;
     let edge = match args.next().as_deref().and_then(|arg| arg.to_str()) {
         Some("--left") => Edge::Left,
         Some("--right") => Edge::Right,
-        _ => bail!("invalid Finder drag edge"),
+        _ => bail!("invalid file drag edge"),
     };
-    anyhow::ensure!(args.next().is_none(), "invalid Finder drag arguments");
+    anyhow::ensure!(args.next().is_none(), "invalid file drag arguments");
     let (events, files) = std::sync::mpsc::sync_channel::<(PathBuf, u64)>(1);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let worker = std::thread::Builder::new()
-        .name("unikvm Finder drag handoff".into())
+        .name("unikvm file drag handoff".into())
         .spawn(move || {
             while let Ok((file, observed_ms)) = files.recv() {
                 if let Some(path) = file.to_str() {
@@ -164,14 +167,14 @@ pub(super) fn source(mut args: impl Iterator<Item = OsString>) -> Result<()> {
                 }
             }
         })?;
-    let result = unikvm_platform::file_drag_source::observe(edge, move |file| {
+    let result = observe(edge, move |file| {
         use std::time::{SystemTime, UNIX_EPOCH};
         if let Ok(age) = SystemTime::now().duration_since(UNIX_EPOCH) {
             let _ = events.try_send((file, age.as_millis() as u64));
         }
     });
     let _ = worker.join();
-    result.context("observe Finder file drags at the display edge")
+    result.context("observe file drags at the display edge")
 }
 
 async fn request(command: Command) -> Result<Reply> {

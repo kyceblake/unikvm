@@ -61,7 +61,6 @@ impl Control {
         let mut capture =
             Capture::with_paste(allow_send, edge, paste).context("start local input monitor")?;
         let native = (cfg!(windows) && self.file_drag).then(|| desktop.file_drop.clone());
-        #[cfg(target_os = "macos")]
         let (local_drag, _source) = if self.file_drag
             && let Some(edge) = edge
         {
@@ -76,15 +75,13 @@ impl Control {
             match crate::desktop::Helper::source(side) {
                 Ok(source) => (Some(route), Some(source)),
                 Err(_) => {
-                    tracing::warn!("could not open the native Finder drag helper");
+                    tracing::warn!("could not open the native drag source helper");
                     (None, None)
                 }
             }
         } else {
             (None, None)
         };
-        #[cfg(target_os = "windows")]
-        let local_drag = None;
         if let Some(edge) = edge {
             info!(side = ?edge.side, "primary display edge switching enabled");
         }

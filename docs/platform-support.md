@@ -41,6 +41,14 @@ Use `--right` to test the other edge. Drag a regular file from Explorer or Finde
 
 Live Explorer and Finder gestures both exposed file references before release. The Windows test also reads a real Shell data object. The probe uses OLE `IDropTarget` and AppKit `NSDraggingInfo`. [Windows Shell drag data](https://learn.microsoft.com/en-us/windows/win32/shell/dataobject) · [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
 
+The Windows source helper observes one file on the configured edge during an unmodified primary-button drag. The input monitor checks that the same physical press is still held on the unlocked desktop before ending the Explorer drag after a peer grant. The Windows source currently uses the standard left-button primary mapping. Finder destination support is pending. [Windows OLE drop target](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragenter) · [Windows input injection](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+
+The Windows desktop regression verifies the tagged Escape press and release and suppresses both events before they reach the foreground application.
+
+```powershell
+cargo test --locked -p unikvm-platform explorer_drag_cancel_posts_a_tagged_escape_pair -- --ignored
+```
+
 ### Probe a native drop into Explorer or Finder
 
 Open an empty destination folder in Explorer or Finder on the desktop being tested. Keep it visible behind the terminal. Use a small disposable file outside that folder and run the probe with its path. Use `--right` on the Mac if the Mac is to the left of Windows.

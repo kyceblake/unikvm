@@ -1,5 +1,11 @@
 # Progress
 
+## Explorer as a native drag source
+
+- The Windows desktop helper observes a single Explorer file at the configured display edge. The agent leaves the drag in Explorer until a pinned peer grants the handoff. It then ends the local drag and captures pointer movement and the physical button release. [Windows source checks](platform-support.md#probe-file-drags-at-the-screen-edge)
+- The Windows Shell test confirmed that the observer reads the file reference during a primary-button drag and declines the local drop. The desktop hook test verified the tagged Escape pair. Windows formatting, workspace Clippy, build, and 74 tests passed. The Apple Silicon workspace passed strict Clippy at compile time.
+- Next, add Finder's deferred file-promise receiver and verify the Windows-to-Mac gesture on the paired desktops.
+
 ## Finder-to-Explorer held-button handoff
 
 - Added the opt-in `input.file_drag` preview. Finder's edge helper supplies one file. The paired Windows agent opens the existing Explorer drop helper before granting pointer control, then allows a file request only after the forwarded button release. The receiver still approves the transfer and the selected folder receives verified bytes. [Desktop test instructions](platform-support.md#test-a-finder-drag-across-the-edge-into-explorer)

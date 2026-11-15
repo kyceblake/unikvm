@@ -26,7 +26,7 @@ pub struct Desktop {
     pub file_drop: NativeDrops,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub drag_offers: broadcast::Sender<OutboundDrag>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub drag_starts: broadcast::Sender<std::path::PathBuf>,
 }
 
@@ -56,7 +56,7 @@ impl Desktop {
                 file_drop: NativeDrops::default(),
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 drag_offers: broadcast::channel(2).0,
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 drag_starts: broadcast::channel(2).0,
             },
             pins,
@@ -132,7 +132,6 @@ impl Helper {
         command.spawn()
     }
 
-    #[cfg(target_os = "macos")]
     pub fn source(side: &str) -> std::io::Result<Self> {
         Self::launch(&["drag-source", side]).map(Self)
     }

@@ -24,27 +24,28 @@ use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, VK_CONTROL, VK_F9, VK_F10, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_V,
+    GetAsyncKeyState, VK_CONTROL, VK_F9, VK_F10, VK_LBUTTON, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetCursorPos, HHOOK, HOOKPROC, KBDLLHOOKSTRUCT,
-    LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, SetWindowsHookExW,
-    UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
-    WM_XBUTTONUP,
+    CallNextHookEx, DispatchMessageW, GetCursorPos, GetSystemMetrics, HHOOK, HOOKPROC,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+    SM_SWAPBUTTON, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_INPUT,
+    WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use super::capture::{
     ARM_DELAY, Command, IdleCursor, MonitorOptions, MonitorWake, POLL, PasteShortcut,
-    PhysicalMotion, Shortcut, activity, button_state, request_start,
+    PhysicalMotion, Shortcut, activity, button_state, drag_input, request_start,
 };
-use super::edge::EdgeTrigger;
+use super::edge::{EdgeLayout, EdgeTrigger};
 use super::windows_cursor::ParkedCursor;
 use super::windows_raw_mouse::RawMouse;
-use super::windows_sink::EVENT_TAG;
-use unikvm_core::geometry::Point;
+use super::windows_sink::{EVENT_TAG, cancel_file_drag};
+use unikvm_core::geometry::{Edge, Point};
 
 const DESKTOP_CHECK: Duration = Duration::from_millis(250);
 
@@ -186,9 +187,12 @@ pub(super) fn run_hooks(
                         state.generation = Some(generation);
                         state.arm_until = now + ARM_DELAY;
                     }
-                    if drag.is_some() || now >= expires || (!state.remote && now >= state.arm_until)
-                    {
+                    if now >= expires || (!state.remote && now >= state.arm_until) {
                         state.emergency();
+                    } else if !state.remote
+                        && let Some(epoch) = drag
+                    {
+                        state.begin_file_drag(generation, epoch);
                     } else if !state.remote && !physical_input_held() {
                         if check_input_desktop().is_err() {
                             state.emergency();
@@ -262,6 +266,32 @@ impl HookState {
         self.remote = true;
     }
 
+    fn begin_file_drag(&mut self, generation: u64, epoch: u64) {
+        if !self.allow_send
+            || self.shortcuts.borrow().drag_epoch != epoch
+            || self
+                .edge
+                .as_ref()
+                .and_then(|edge| drag_height(edge.layout))
+                .is_none()
+        {
+            self.emergency();
+            return;
+        }
+        self.begin_capture(true);
+        if !self.remote {
+            return;
+        }
+        if cancel_file_drag().is_err() {
+            self.emergency();
+            return;
+        }
+        // The original press reached Explorer. Its release belongs to the remote input session.
+        self.swallowed_buttons[0] = true;
+        self.shortcuts
+            .send_modify(|signal| signal.drag_generation = Some(generation));
+    }
+
     fn relative_motion(&mut self, dx: i32, dy: i32) {
         self.check_capture_command();
         if self.remote && self.raw_motion {
@@ -293,6 +323,9 @@ impl HookState {
 
     fn key(&mut self, event: &KBDLLHOOKSTRUCT, pressed: bool) -> bool {
         self.check_capture_command();
+        if !self.remote {
+            drag_input(&self.shortcuts);
+        }
         // Switching to the Japanese IME can produce an untagged key release
         // during remote injection. A physical press already reclaims control.
         if pressed {
@@ -441,6 +474,9 @@ impl HookState {
         };
         if let Some((button, index, pressed)) = mapped {
             self.pointer_buttons[index] = pressed;
+            if !self.remote {
+                drag_input(&self.shortcuts);
+            }
             if self.remote
                 && self.enqueue(InputEvent::PointerButton {
                     button,
@@ -555,6 +591,25 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
 pub(super) fn physical_input_held() -> bool {
     // SAFETY: These argument-only Win32 calls read current key/button state outside a hook.
     (1..=254).any(|key| unsafe { GetAsyncKeyState(key) } < 0)
+}
+
+pub(super) fn drag_height(edge: EdgeLayout) -> Option<u16> {
+    check_input_desktop().ok()?;
+    // SAFETY: Query the current physical state outside the low-level input callbacks.
+    // The Windows input adapter maps the left button to the primary button.
+    if unsafe { GetSystemMetrics(SM_SWAPBUTTON) } != 0
+        || unsafe { GetAsyncKeyState(i32::from(VK_LBUTTON)) } >= 0
+        || (2..=254).any(|key| unsafe { GetAsyncKeyState(key) } < 0)
+    {
+        return None;
+    }
+    let point = super::windows_edge::position().ok()?;
+    let dx = match edge.side {
+        Edge::Left => -4,
+        Edge::Right => 4,
+        _ => return None,
+    };
+    edge.crossing(point, dx, 0)
 }
 
 pub(crate) fn check_input_desktop() -> io::Result<()> {
@@ -701,6 +756,65 @@ mod tests {
         assert_eq!(key_usage(0x50, false), Some(0x5a));
         assert_eq!(key_usage(0x50, true), Some(0x51));
         assert_eq!(key_usage(0xff, false), None);
+    }
+
+    #[test]
+    fn physical_release_invalidates_the_pending_drag_handoff() {
+        let (shortcuts, signals) = watch::channel(Shortcut::default());
+        let (events, mut output) = mpsc::channel(4);
+        let mut hook = hook_state(shortcuts, events);
+        let mouse = MSLLHOOKSTRUCT::default();
+        assert!(!hook.pointer(&mouse, WM_LBUTTONDOWN));
+        let epoch = signals.borrow().drag_epoch;
+        assert!(!hook.pointer(&mouse, WM_MOUSEMOVE));
+        assert_eq!(signals.borrow().drag_epoch, epoch);
+        assert!(!hook.pointer(&mouse, WM_LBUTTONUP));
+        assert_ne!(signals.borrow().drag_epoch, epoch);
+        hook.begin_file_drag(1, epoch);
+        assert!(!hook.remote);
+        assert!(signals.borrow().cancelled);
+        assert!(output.try_recv().is_err());
+    }
+
+    #[test]
+    #[ignore = "installs a short-lived hook on the interactive Windows desktop"]
+    fn explorer_drag_cancel_posts_a_tagged_escape_pair() {
+        use std::{sync::atomic::AtomicU8, thread};
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+
+        static EVENTS: AtomicU8 = AtomicU8::new(0);
+        unsafe extern "system" fn guard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            if code == 0 {
+                // SAFETY: WH_KEYBOARD_LL passes a live KBDLLHOOKSTRUCT during HC_ACTION.
+                let key = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+                if key.dwExtraInfo == EVENT_TAG && key.vkCode == u32::from(VK_ESCAPE) {
+                    if matches!(wparam as u32, WM_KEYDOWN | WM_KEYUP) {
+                        EVENTS.fetch_or(if wparam as u32 == WM_KEYDOWN { 1 } else { 2 }, Relaxed);
+                    }
+                    // The probe must leave the foreground application's input alone.
+                    return 1;
+                }
+            }
+            // SAFETY: Forward arguments obtained from the Windows hook callback.
+            unsafe { CallNextHookEx(null_mut(), code, wparam, lparam) }
+        }
+
+        check_input_desktop().unwrap();
+        let _guard = Hook::install(WH_KEYBOARD_LL, guard).unwrap();
+        let injector = thread::spawn(cancel_file_drag);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (!injector.is_finished() || EVENTS.load(Relaxed) != 3) && Instant::now() < deadline {
+            let mut message = MSG::default();
+            // SAFETY: This test thread owns the hook queue and writable MSG storage.
+            unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) };
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            injector.is_finished(),
+            "Escape injection stopped responding"
+        );
+        injector.join().unwrap().unwrap();
+        assert_eq!(EVENTS.load(Relaxed), 3);
     }
 
     #[test]

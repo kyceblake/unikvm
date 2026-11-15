@@ -14,27 +14,35 @@ mod deferred;
 
 use unikvm_core::geometry::Edge;
 use windows::Win32::{
-    Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
+    Foundation::{
+        DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND as OleWindow,
+        POINTL, S_OK,
+    },
     System::{
-        Com::IDataObject,
+        Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL},
         Ole::{
             DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource,
-            IDropSource_Impl, OleInitialize, OleUninitialize,
+            IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize,
+            RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
         },
         SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
     },
 };
-use windows::core::{BOOL, HRESULT, implement};
+use windows::core::{BOOL, HRESULT, Ref, Result, implement};
 use windows_sys::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         Graphics::Gdi::{COLOR_HIGHLIGHT, GetSysColorBrush},
-        System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            GetSystemMetrics, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
-            SW_SHOWNOACTIVATE, SetTimer, ShowWindow, TranslateMessage, WM_CLOSE, WM_LBUTTONDOWN,
-            WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        System::{LibraryLoader::GetModuleHandleW, Ole::CF_HDROP},
+        UI::{
+            HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
+            WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+                GetSystemMetrics, LWA_ALPHA, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN,
+                SM_CYSCREEN, SW_SHOWNOACTIVATE, SetLayeredWindowAttributes, SetTimer, ShowWindow,
+                TranslateMessage, WM_CLOSE, WM_LBUTTONDOWN, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            },
         },
     },
     core::w,
@@ -45,38 +53,30 @@ use {
     crate::drag_probe::{self, Source},
     std::path::Path,
     windows::{
-        Win32::{
-            Foundation::{HWND as OleWindow, POINTL},
-            System::{
-                Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL},
-                Ole::{
-                    IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium,
-                    RevokeDragDrop,
-                },
-            },
-            UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
-        },
-        core::{HSTRING, Ref, Result},
+        Win32::UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
+        core::HSTRING,
     },
-    windows_sys::Win32::System::Ole::CF_HDROP,
 };
 
-#[cfg(feature = "file-drag-probe")]
 #[implement(IDropTarget)]
-struct EdgeTarget;
+struct EdgeTarget {
+    report: Box<dyn Fn(Option<Vec<PathBuf>>)>,
+    require_primary: bool,
+}
 
-#[cfg(feature = "file-drag-probe")]
 #[allow(non_snake_case)]
 impl IDropTarget_Impl for EdgeTarget_Impl {
     fn DragEnter(
         &self,
         object: Ref<'_, IDataObject>,
-        _keys: MODIFIERKEYS_FLAGS,
+        keys: MODIFIERKEYS_FLAGS,
         _point: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
         reject(effect);
-        drag_probe::report(object.as_ref().and_then(references));
+        if !self.require_primary || keys == MK_LBUTTON {
+            (self.report)(object.as_ref().and_then(references));
+        }
         Ok(())
     }
 
@@ -106,7 +106,6 @@ impl IDropTarget_Impl for EdgeTarget_Impl {
     }
 }
 
-#[cfg(feature = "file-drag-probe")]
 fn reject(effect: *mut DROPEFFECT) {
     // SAFETY: OLE provides a writable effect pointer for the callback.
     if let Some(effect) = unsafe { effect.as_mut() } {
@@ -114,7 +113,6 @@ fn reject(effect: *mut DROPEFFECT) {
     }
 }
 
-#[cfg(feature = "file-drag-probe")]
 fn references(object: &IDataObject) -> Option<Vec<PathBuf>> {
     let format = FORMATETC {
         cfFormat: CF_HDROP,
@@ -198,6 +196,45 @@ pub fn run_received(
     run_edge(edge, Some(object), released, ready).map(|copied| copied.unwrap_or(false))
 }
 
+/// Observe a one-file Explorer drag without accepting the local drop.
+pub fn observe(edge: Edge, file: impl Fn(PathBuf) + 'static) -> io::Result<()> {
+    let _ole = Apartment::new()?;
+    // SAFETY: These calls act on the OLE thread and its owned edge window.
+    unsafe {
+        if SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        // The receiving pointer lands two pixels inside the edge, past this strip.
+        let window = edge_window(edge, 2, WS_EX_LAYERED)?;
+        if SetLayeredWindowAttributes(window.0, 0, 64, LWA_ALPHA) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _registration = Registration::new(
+            &window,
+            EdgeTarget {
+                require_primary: true,
+                report: Box::new(move |paths| {
+                    if let Some([path]) = paths.as_deref() {
+                        file(path.clone());
+                    }
+                }),
+            },
+        )?;
+        ShowWindow(window.0, SW_SHOWNOACTIVATE);
+        let mut event = MSG::default();
+        loop {
+            match GetMessageW(&mut event, null_mut(), 0, 0) {
+                -1 => return Err(io::Error::last_os_error()),
+                0 => return Ok(()),
+                _ => {
+                    TranslateMessage(&event);
+                    DispatchMessageW(&event);
+                }
+            }
+        }
+    }
+}
+
 fn run_edge(
     edge: Edge,
     object: Option<IDataObject>,
@@ -206,47 +243,16 @@ fn run_edge(
 ) -> io::Result<Option<bool>> {
     // SAFETY: This thread owns the window, registration and message queue.
     unsafe {
-        let width = 18;
-        let left = match edge {
-            Edge::Left => 0,
-            Edge::Right => GetSystemMetrics(SM_CXSCREEN) - width,
-            _ => return Err(io::Error::other("choose a horizontal edge")),
-        };
-        let application = GetModuleHandleW(null());
-        let name = w!("UniKVMFileDrag");
-        if RegisterClassW(&WNDCLASSW {
-            lpfnWndProc: Some(window_proc),
-            hInstance: application,
-            hbrBackground: GetSysColorBrush(COLOR_HIGHLIGHT),
-            lpszClassName: name,
-            ..Default::default()
-        }) == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            name,
-            name,
-            WS_POPUP,
-            left,
-            0,
-            width,
-            GetSystemMetrics(SM_CYSCREEN),
-            null_mut(),
-            null_mut(),
-            application,
-            null(),
-        );
-        if hwnd.is_null() {
-            return Err(io::Error::last_os_error());
-        }
-        let window = Window(hwnd);
+        let window = edge_window(edge, 18, 0)?;
         #[cfg(feature = "file-drag-probe")]
         let _registration = if object.is_none() {
-            let target: IDropTarget = EdgeTarget.into();
-            RegisterDragDrop(OleWindow(window.0), &target).map_err(io::Error::other)?;
-            Some(Registration(window.0))
+            Some(Registration::new(
+                &window,
+                EdgeTarget {
+                    report: Box::new(drag_probe::report),
+                    require_primary: false,
+                },
+            )?)
         } else {
             None
         };
@@ -283,6 +289,47 @@ fn run_edge(
                 }
             }
         }
+    }
+}
+
+fn edge_window(edge: Edge, width: i32, extra_style: u32) -> io::Result<Window> {
+    // SAFETY: This thread owns the class callback and the new window.
+    unsafe {
+        let left = match edge {
+            Edge::Left => 0,
+            Edge::Right => GetSystemMetrics(SM_CXSCREEN) - width,
+            _ => return Err(io::Error::other("choose a horizontal edge")),
+        };
+        let application = GetModuleHandleW(null());
+        let name = w!("UniKVMFileDrag");
+        if RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(window_proc),
+            hInstance: application,
+            hbrBackground: GetSysColorBrush(COLOR_HIGHLIGHT),
+            lpszClassName: name,
+            ..Default::default()
+        }) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let hwnd = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | extra_style,
+            name,
+            name,
+            WS_POPUP,
+            left,
+            0,
+            width,
+            GetSystemMetrics(SM_CYSCREEN),
+            null_mut(),
+            null_mut(),
+            application,
+            null(),
+        );
+        if hwnd.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Window(hwnd))
     }
 }
 
@@ -329,10 +376,17 @@ impl Drop for Window {
     }
 }
 
-#[cfg(feature = "file-drag-probe")]
 struct Registration(HWND);
 
-#[cfg(feature = "file-drag-probe")]
+impl Registration {
+    fn new(window: &Window, target: EdgeTarget) -> io::Result<Self> {
+        let target: IDropTarget = target.into();
+        // SAFETY: The window and target share the initialized OLE apartment.
+        unsafe { RegisterDragDrop(OleWindow(window.0), &target) }.map_err(io::Error::other)?;
+        Ok(Self(window.0))
+    }
+}
+
 impl Drop for Registration {
     fn drop(&mut self) {
         // SAFETY: Revoke the registered drop target before destroying the window.
@@ -350,5 +404,45 @@ mod tests {
         let original = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let object = file_object(&original, &ole).unwrap();
         assert_eq!(references(&object).unwrap(), vec![original]);
+    }
+
+    #[test]
+    fn explorer_source_reads_only_the_primary_drag_and_declines_the_local_drop() {
+        use std::{cell::RefCell, rc::Rc};
+        use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON};
+
+        let ole = Apartment::new().unwrap();
+        let original = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let object = file_object(&original, &ole).unwrap();
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let target: IDropTarget = EdgeTarget {
+            require_primary: true,
+            report: Box::new({
+                let observed = observed.clone();
+                move |paths| observed.borrow_mut().push(paths.unwrap())
+            }),
+        }
+        .into();
+        // SAFETY: The Shell file and drop interfaces remain on this OLE thread.
+        unsafe {
+            for keys in [MK_RBUTTON, MK_LBUTTON | MK_CONTROL, MK_LBUTTON] {
+                let mut effect = DROPEFFECT_COPY;
+                target
+                    .DragEnter(&object, keys, POINTL::default(), &mut effect)
+                    .unwrap();
+                assert_eq!(effect, DROPEFFECT_NONE);
+            }
+            let mut effect = DROPEFFECT_COPY;
+            target
+                .Drop(
+                    &object,
+                    MODIFIERKEYS_FLAGS(0),
+                    POINTL::default(),
+                    &mut effect,
+                )
+                .unwrap();
+            assert_eq!(effect, DROPEFFECT_NONE);
+        }
+        assert_eq!(*observed.borrow(), vec![vec![original]]);
     }
 }

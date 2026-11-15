@@ -152,17 +152,7 @@ impl WindowsInputSink {
         if !pressed {
             flags |= KEYEVENTF_KEYUP;
         }
-        inject(INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wScan: scan,
-                    dwFlags: flags,
-                    dwExtraInfo: EVENT_TAG,
-                    ..Default::default()
-                },
-            },
-        })?;
+        inject(keyboard_input(scan, flags))?;
         *key = pressed;
         Ok(())
     }
@@ -205,6 +195,42 @@ fn mouse_input(flags: u32, data: u32, dx: i32, dy: i32) -> INPUT {
             },
         },
     }
+}
+
+fn keyboard_input(scan: u16, flags: u32) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wScan: scan,
+                dwFlags: flags,
+                dwExtraInfo: EVENT_TAG,
+                ..Default::default()
+            },
+        },
+    }
+}
+
+pub(super) fn cancel_file_drag() -> io::Result<()> {
+    let escape = 0x01;
+    let up = keyboard_input(escape, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP);
+    let events = [keyboard_input(escape, KEYEVENTF_SCANCODE), up];
+    // SAFETY: Submit both initialized, tagged Escape events in one call. If the
+    // OS accepts only the first event, attempt its release before unwinding capture.
+    let sent = unsafe {
+        SendInput(
+            events.len() as u32,
+            events.as_ptr(),
+            size_of::<INPUT>() as i32,
+        )
+    };
+    if sent != events.len() as u32 {
+        if sent == 1 {
+            let _ = inject(up);
+        }
+        return Err(io::Error::other("could not cancel the local Explorer drag"));
+    }
+    Ok(())
 }
 
 fn inject(input: INPUT) -> io::Result<()> {

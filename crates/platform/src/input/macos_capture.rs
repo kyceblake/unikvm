@@ -33,7 +33,7 @@ use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 use super::capture::{
     ARM_DELAY, Command, IdleCursor, MonitorOptions, MonitorWake, POLL, PasteShortcut,
-    PhysicalMotion, Shortcut, activity, button_state, request_start,
+    PhysicalMotion, Shortcut, activity, button_state, drag_input, request_start,
 };
 use super::edge::EdgeTrigger;
 use super::macos::{EVENT_TAG, MacInputSink, key_code};
@@ -597,8 +597,7 @@ impl TapState {
                     | OtherMouseUp
             )
         {
-            self.shortcuts
-                .send_modify(|signal| signal.drag_epoch = signal.drag_epoch.wrapping_add(1));
+            drag_input(&self.shortcuts);
         }
         if !matches!(kind, ScrollWheel) || event.get_integer_value_field(MOMENTUM_PHASE) == 0 {
             self.idle_cursor.show();

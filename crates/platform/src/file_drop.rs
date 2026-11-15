@@ -1,8 +1,8 @@
-//! Native Windows delivery of a verified file through the Shell drag data object.
+//! Native Windows file drag observation and delivery through the Shell data object.
 
 mod windows;
 
-pub use windows::run_received;
+pub use windows::{observe, run_received};
 
 #[cfg(feature = "file-drag-probe")]
 pub(crate) use windows::run_probe;

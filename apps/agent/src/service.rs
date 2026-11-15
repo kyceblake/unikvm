@@ -326,7 +326,7 @@ async fn serve(
             (
                 |command| local.command(command, &exit),
                 |drop_command| {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
                     if let file_drop::Command::Start {
                         ref path,
                         observed_ms,

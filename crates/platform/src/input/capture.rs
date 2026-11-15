@@ -201,10 +201,7 @@ impl Capture {
         #[cfg(target_os = "macos")]
         return super::macos_capture::drag_height(side);
         #[cfg(target_os = "windows")]
-        {
-            let _ = side;
-            None
-        }
+        return super::windows::drag_height(EdgeLayout::primary(side).ok()?);
     }
 
     fn renew_capture(&self, generation: u64, expires: Instant, edge: bool, drag: Option<u64>) {
@@ -344,6 +341,10 @@ impl PhysicalMotion {
 
 pub(super) fn activity(signals: &watch::Sender<Shortcut>) {
     signals.send_modify(|signal| signal.activity = signal.activity.wrapping_add(1));
+}
+
+pub(super) fn drag_input(signals: &watch::Sender<Shortcut>) {
+    signals.send_modify(|signal| signal.drag_epoch = signal.drag_epoch.wrapping_add(1));
 }
 
 pub(super) fn button_state(pressed: bool) -> ButtonState {
