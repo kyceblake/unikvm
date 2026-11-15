@@ -80,13 +80,14 @@ impl MacInputSink {
     }
 
     /// Only this sink's authenticated injected primary hold can return a drag.
+    /// Quartz hardware queries can also include injected button state. Physical
+    /// takeover is enforced by the capture monitor and receiver session instead.
     pub fn remote_drag_height(&self, edge: EdgeLayout) -> Option<u16> {
         if !self.buttons[0]
             || self.buttons[1..].contains(&true)
             || self.keys.contains(&true)
             || self.is_locked_receiver()
             || !self.check_permission()
-            || super::macos_capture::physical_input_held()
         {
             return None;
         }
@@ -100,7 +101,7 @@ impl MacInputSink {
 
     pub fn cancel_remote_drag(&mut self) -> io::Result<()> {
         self.check_access()?;
-        if self.is_locked_receiver() || super::macos_capture::physical_input_held() {
+        if self.is_locked_receiver() {
             return Err(io::Error::other("remote drag is no longer eligible"));
         }
         super::macos_capture::cancel_native_drag()
