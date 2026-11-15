@@ -4,6 +4,12 @@
 pub mod clipboard;
 
 #[cfg(all(
+    feature = "file-drag-probe",
+    any(target_os = "macos", target_os = "windows")
+))]
+pub mod drag_probe;
+
+#[cfg(all(
     feature = "clipboard-monitor",
     any(target_os = "macos", target_os = "windows")
 ))]

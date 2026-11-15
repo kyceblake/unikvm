@@ -260,7 +260,7 @@ unsafe fn read_files() -> Option<Vec<PathBuf>> {
     unsafe { read_drop(GetClipboardData(u32::from(CF_HDROP))) }
 }
 
-unsafe fn read_drop(drop: HGLOBAL) -> Option<Vec<PathBuf>> {
+pub(crate) unsafe fn read_drop(drop: HGLOBAL) -> Option<Vec<PathBuf>> {
     // SAFETY: The caller supplies a live HDROP global memory block or null.
     unsafe {
         if drop.is_null() {

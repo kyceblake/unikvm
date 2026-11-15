@@ -52,6 +52,8 @@ The native monitor uses the existing `windows-sys` 0.61.2 bindings for a Win32 w
 
 The tray uses the existing AppKit bindings for the status item and transfer panel and `windows-sys` for the notification icon. Windows Shell progress uses Microsoft’s generated COM bindings in `windows` 0.62.2 (Rust 1.82, MIT OR Apache-2.0). The CLI embeds the Common Controls v6 manifest with `embed-manifest` 1.5.1 (Rust 1.85, MIT), which supports the Windows GNU and MSVC linkers. [Windows COM bindings](https://docs.rs/crate/windows/0.62.2/source/Cargo.toml.orig) · [Manifest embedding](https://docs.rs/embed-manifest/1.5.1/embed_manifest/)
 
+The optional file drag probe enables OLE drop targets and AppKit dragging in the existing platform bindings. It declares the already locked `windows-core` 0.62.2 (Rust 1.82, MIT OR Apache-2.0) directly because the OLE implementation macro references it. [Windows Core manifest](https://docs.rs/crate/windows-core/0.62.2/source/Cargo.toml)
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |

@@ -12,10 +12,14 @@ mod paste;
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(all(feature = "file-drag-probe", target_os = "macos"))]
+pub(crate) use macos::file_paths;
 #[cfg(target_os = "macos")]
 pub use macos::{Clipboard, open_source, staging_directory};
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 pub use paste::PasteRequests;
+#[cfg(all(feature = "file-drag-probe", target_os = "windows"))]
+pub(crate) use windows::read_drop;
 #[cfg(target_os = "windows")]
 pub use windows::{Clipboard, open_source, staging_directory};
 

@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-15 — File drag edge probe
+
+- Added a standalone native probe that checks whether Explorer and Finder supply file references while the mouse button is held at a display edge. It reports counts and leaves the source files untouched.
+- Windows passed the Shell data-object test. The Apple Silicon probe passed compile-time Clippy. Live edge gestures still need manual desktop verification.
+- Next, verify the Finder and Explorer edge gestures, then test starting a corresponding native drop on the other device. Reuse the existing approval, byte progress, and verified file transfer after a remote drop. [File drag probe instructions](platform-support.md#probe-file-drags-at-the-screen-edge)
+
 ## 2026-11-15 — Native tray and transfer dialogs
 
 - Replaced the standalone clipboard monitor with the Windows tray icon and macOS menu bar item. The tray shows paired computers and transfer status. Connect, Disconnect, and Exit act on the local agent.

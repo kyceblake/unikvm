@@ -9,6 +9,25 @@ publish.workspace = true
 workspace = true
 
 [features]
+file-drag-probe = [
+    "dep:windows",
+    "dep:windows-core",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_System_Ole",
+    "windows/Win32_System_Com_StructuredStorage",
+    "windows/Win32_System_Memory",
+    "windows/Win32_System_SystemServices",
+    "objc2-app-kit/NSApplication",
+    "objc2-app-kit/NSColor",
+    "objc2-app-kit/NSDragging",
+    "objc2-app-kit/NSGraphics",
+    "objc2-app-kit/NSResponder",
+    "objc2-app-kit/NSRunningApplication",
+    "objc2-app-kit/NSScreen",
+    "objc2-app-kit/NSWindow",
+    "objc2-foundation/NSGeometry",
+    "objc2-foundation/NSTimer",
+]
 clipboard-monitor = [
     "dep:unikvm-protocol",
     "dep:windows",
@@ -64,6 +83,7 @@ rustix = { workspace = true, features = ["fs", "process"] }
 image = { workspace = true, features = ["bmp", "png"] }
 unikvm-core.workspace = true
 windows = { workspace = true, optional = true, features = ["Win32_System_Com", "Win32_UI_Shell_PropertiesSystem"] }
+windows-core = { workspace = true, optional = true }
 windows-sys = { workspace = true, features = [
     "Win32_Graphics_Gdi",
     "Win32_Security_Authorization",
@@ -89,6 +109,10 @@ windows-sys = { workspace = true, features = [
 
 [dev-dependencies]
 unikvm-protocol.workspace = true
+
+[[example]]
+name = "file_drag_probe"
+required-features = ["file-drag-probe"]
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 windows-sys = { workspace = true, features = [

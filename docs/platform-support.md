@@ -29,6 +29,18 @@ Wayland InputCapture distinguishes enabled from active. The documented barrier p
 
 Other API references include [Apple event taps](https://developer.apple.com/documentation/coregraphics/cgevent/tapcreate(tap:place:options:eventsofinterest:callback:userinfo:)), [Apple cursor warp](https://developer.apple.com/documentation/coregraphics/cgwarpmousecursorposition(_:)), [Xlib](https://www.x.org/releases/current/doc/libX11/libX11/libX11.html), and [XTEST](https://www.x.org/releases/current/doc/libXtst/xtestlib.pdf).
 
+## Probe file drags at the screen edge
+
+Run the standalone probe from an interactive Windows or Mac desktop.
+
+```sh
+cargo run --locked -p unikvm-platform --features file-drag-probe --example file_drag_probe -- --left
+```
+
+Use `--right` to test the other edge. Drag a regular file from Explorer or Finder into the highlighted strip and hold the mouse button. The probe prints the number of file references it can read before release. It declines the drop and closes after 45 seconds.
+
+The Windows test read a real Shell data object for a local test file. Apple Silicon passed the compile check. The live Explorer and Finder edge gestures still need to be checked on their respective desktops. The probe uses OLE `IDropTarget` and AppKit `NSDraggingInfo`. [Windows Shell drag data](https://learn.microsoft.com/en-us/windows/win32/shell/dataobject) · [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
+
 ## Run the Windows probe
 
 Run these from an interactive desktop with a harmless foreground window. The probe sends a paired F24 press/release and a one-unit relative pointer move, checks tagged hook delivery and suppression, and restores the starting pointer position. It collects counts without recording key identities.

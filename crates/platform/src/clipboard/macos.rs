@@ -242,7 +242,10 @@ pub fn staging_directory() -> io::Result<PathBuf> {
         .canonicalize()
 }
 
-fn file_paths(items: &NSArray<NSPasteboardItem>, kind: &NSString) -> Option<Vec<PathBuf>> {
+pub(crate) fn file_paths(
+    items: &NSArray<NSPasteboardItem>,
+    kind: &NSString,
+) -> Option<Vec<PathBuf>> {
     if !(1..=MAX_FILES).contains(&items.len()) {
         return None;
     }

@@ -1415,6 +1415,7 @@ dependencies = [
  "unikvm-core",
  "unikvm-protocol",
  "windows",
+ "windows-core",
  "windows-sys 0.61.2",
  "zeroize",
 ]
