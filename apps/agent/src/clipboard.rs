@@ -13,6 +13,7 @@ pub fn start(
     _: watch::Sender<ClipboardStatus>,
     _: watch::Sender<Option<Approval>>,
     _: mpsc::Receiver<ApprovalDecision>,
+    _: bool,
 ) -> anyhow::Result<()> {
     anyhow::bail!("clipboard sharing is available on Windows and macOS");
 }

@@ -141,7 +141,7 @@ async fn generation(
     let control = config
         .input
         .as_ref()
-        .map(|input| crate::input::Control::new(input, Some(&endpoint)))
+        .map(|input| crate::input::Control::new(input, Some(&endpoint), config.diagnostics))
         .transpose()?;
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     let paste = config
@@ -150,6 +150,7 @@ async fn generation(
         .filter(|clipboard| clipboard.files)
         .map(|_| unikvm_platform::clipboard::PasteRequests::default());
     let (decide, decisions) = mpsc::channel(4);
+    let diagnostics = config.diagnostics;
     let clipboard = config
         .clipboard
         .as_ref()
@@ -160,6 +161,7 @@ async fn generation(
                 local.status.clone(),
                 local.offer.clone(),
                 decisions,
+                diagnostics,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
                 (paste.clone(), local.desktop.clone(), pins),
             )

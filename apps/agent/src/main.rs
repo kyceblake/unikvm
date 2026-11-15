@@ -53,6 +53,9 @@ fn run() -> Result<()> {
         .with_ansi(false)
         .try_init()
         .map_err(anyhow::Error::msg)?;
+    if config.diagnostics {
+        tracing::info!(target: "unikvm::diagnostics", "performance diagnostics enabled");
+    }
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?

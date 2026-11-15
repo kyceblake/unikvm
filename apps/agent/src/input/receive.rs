@@ -14,7 +14,10 @@ use unikvm_protocol::input::{
     HEARTBEAT_ACK, LEASE, REQUEST, RETURN_EDGE_REQUEST,
 };
 
-use super::Focus;
+use super::{
+    Focus,
+    timing::{InputKind, Latencies},
+};
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_millis(750);
 const DRAG_SETUP: Duration = Duration::from_secs(4);
@@ -32,6 +35,7 @@ pub(super) struct Options {
     pub allow_locked_receive: bool,
     pub native: Option<crate::desktop::NativeDrops>,
     pub remote_drag: Option<crate::desktop::Desktop>,
+    pub diagnostics: bool,
 }
 
 pub async fn run(
@@ -203,7 +207,7 @@ async fn receive(
                 .await
                 .context("input grant timed out")??;
             info!("receiving peer input");
-            inject(&mut sink, send, recv, entry, options.edge, &mut drag, (&mut returns, &mut native_return)).await
+            inject(&mut sink, send, recv, entry, options, &mut drag, (&mut returns, &mut native_return)).await
         } => result.map(|height| (false, height)),
     };
     drop(drag);
@@ -333,7 +337,7 @@ async fn inject(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     entry: Option<(EdgeLayout, u16)>,
-    return_edge: Option<EdgeLayout>,
+    options: &Options,
     drag: &mut Option<ReceivingDrag<'_>>,
     (returns, native_return): (&mut Option<ReturnSource>, &mut bool),
 ) -> Result<Option<u16>> {
@@ -341,7 +345,11 @@ async fn inject(
     let mut pending_return = None;
     // Reposition only after granting focus and reading the first heartbeat.
     let mut pending_entry = entry;
-    let edge = entry.map(|(edge, _)| edge).or(return_edge);
+    let edge = entry.map(|(edge, _)| edge).or(options.edge);
+    let mut timings = options
+        .diagnostics
+        .then(|| Latencies::new("receive_to_native_post"));
+    let mut motion_received = None;
     let mut was_locked = sink.is_locked_receiver();
     let mut motion = if entry.is_none() {
         pointer_pacer(sink)
@@ -352,6 +360,7 @@ async fn inject(
         let locked = sink.is_locked_receiver();
         if was_locked && !locked {
             motion = pointer_pacer(sink);
+            motion_received = None;
         }
         was_locked = locked;
         let read = timeout_at(deadline, input::read(recv));
@@ -367,10 +376,11 @@ async fn inject(
                     }
                     step = pacer.next() => {
                         let [dx, dy] = step.context("pace pointer movement")?;
-                        if (dx != 0 || dy != 0)
-                            && let Some(height) = move_pointer(sink, edge, dx, dy)?
-                        {
-                            return Ok(Some(height));
+                        if dx != 0 || dy != 0 {
+                            if let Some(height) = move_pointer(sink, edge, dx, dy)? {
+                                return Ok(Some(height));
+                            }
+                            record_post(&mut timings, InputKind::MouseMotion, motion_received.take());
                         }
                         tokio::task::yield_now().await;
                     }
@@ -390,8 +400,10 @@ async fn inject(
 
         match frame.context("peer input lease expired")?? {
             Frame::Release => {
-                if let Some(pacer) = &mut motion {
-                    flush_motion(pacer, sink)?;
+                if let Some(pacer) = &mut motion
+                    && flush_motion(pacer, sink)?
+                {
+                    record_post(&mut timings, InputKind::MouseMotion, motion_received.take());
                 }
                 return Ok(None);
             }
@@ -400,16 +412,24 @@ async fn inject(
                     pending_entry.is_none(),
                     "first heartbeat required before edge input"
                 );
+                let received = timings.as_ref().map(|_| Instant::now());
                 if let Some(pacer) = &mut motion {
                     if let InputEvent::PointerMove { dx, dy } = event
                         && pacer.queue(dx, dy)
                     {
+                        if dx != 0 || dy != 0 {
+                            // Several motion frames can contribute to the same post.
+                            motion_received = received;
+                        }
                         tokio::task::yield_now().await;
                         continue;
                     }
                     // Preserve pointer position before discrete input, including
                     // clicks, and drain it before falling back to immediate motion.
-                    flush_motion(pacer, sink)?;
+                    let pending = motion_received.take();
+                    if flush_motion(pacer, sink)? {
+                        record_post(&mut timings, InputKind::MouseMotion, pending);
+                    }
                 }
                 if let InputEvent::PointerMove { dx, dy } = event {
                     if let Some(height) = move_pointer(sink, edge, dx, dy)? {
@@ -424,6 +444,7 @@ async fn inject(
                         sink.send(event)?;
                     }
                 }
+                record_post(&mut timings, event.into(), received);
             }
             Frame::Heartbeat(token) => {
                 if let Some(drag) = drag.as_mut().filter(|drag| !drag.released) {
@@ -507,12 +528,19 @@ fn move_pointer(
     Ok(None)
 }
 
-fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Result<()> {
+fn record_post(timings: &mut Option<Latencies>, kind: InputKind, started: Option<Instant>) {
+    if let (Some(timings), Some(started)) = (timings, started) {
+        timings.record(kind, started);
+    }
+}
+
+fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Result<bool> {
     let [dx, dy] = pacer.take_pending();
     if dx != 0 || dy != 0 {
         sink.send(InputEvent::PointerMove { dx, dy })?;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 struct ReturnSource {

@@ -27,6 +27,8 @@ pub struct Config {
     schema_version: u16,
     #[serde(default)]
     pub log_level: LogLevel,
+    #[serde(default)]
+    pub diagnostics: bool,
     pub network: Option<NetworkConfig>,
     pub input: Option<InputConfig>,
     pub clipboard: Option<ClipboardConfig>,
@@ -107,6 +109,7 @@ impl Default for Config {
         Self {
             schema_version: SCHEMA_VERSION,
             log_level: LogLevel::default(),
+            diagnostics: false,
             network: None,
             input: None,
             clipboard: None,
@@ -296,6 +299,16 @@ mod tests {
                 .unwrap()
                 .log_level,
             LogLevel::Debug
+        );
+    }
+
+    #[test]
+    fn performance_diagnostics_are_opt_in() {
+        assert!(!Config::parse("schema_version = 1").unwrap().diagnostics);
+        assert!(
+            Config::parse("schema_version = 1\ndiagnostics = true")
+                .unwrap()
+                .diagnostics
         );
     }
 

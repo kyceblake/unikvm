@@ -244,8 +244,17 @@ The schema must be versioned and forward-compatible. All fields from untrusted p
 
 ### Phase 6 — hardening and first release
 
+#### Performance baseline and optimization
+
+- Add opt-in diagnostics to regular release builds. Report separate keyboard, pointer motion, and mouse button or scroll latency measurements, plus verified file transfer throughput.
+- Record a Windows–macOS baseline in both directions at idle and during a 50 MB transfer. Keep the peer link, display refresh rates, and test files consistent for comparisons.
+- Use those results to prioritize changes to input pacing, queueing, or transfer throughput. Repeat the same test after each change and check shared input, cancellation, and file integrity.
+
+**Done when:** Both directions have reproducible baselines and measured results for any tuning shipped. Diagnostics are off by default and record no key data, pointer coordinates, or file contents.
+
+#### Release hardening
+
 - Cross-platform CI, automated tests, integration test harnesses, packaging, user-session autostart, onboarding, platform capability warnings, and threat-model review.
-- Performance instrumentation and optimization after functional correctness.
 
 **Done when:** Installation, pairing, normal use, and disconnection recovery are documented and reproducible on supported environments.
 

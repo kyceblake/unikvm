@@ -70,6 +70,7 @@ pub fn start(
     status: watch::Sender<ClipboardStatus>,
     approval: watch::Sender<Option<Approval>>,
     decisions: mpsc::Receiver<ApprovalDecision>,
+    diagnostics: bool,
     (paste, ui, pins): (
         Option<PasteRequests>,
         crate::desktop::Desktop,
@@ -123,6 +124,7 @@ pub fn start(
                 }
                 let worker = Rc::new(Desktop {
                     local,
+                    diagnostics,
                     status,
                     approval,
                     paste,
@@ -154,6 +156,7 @@ pub fn start(
 
 struct Desktop {
     local: DeviceId,
+    diagnostics: bool,
     status: watch::Sender<ClipboardStatus>,
     approval: watch::Sender<Option<Approval>>,
     paste: Option<PasteRequests>,
@@ -702,6 +705,10 @@ impl Link<'_> {
                 self.send_job = Some(Box::pin(async move {
                     let slot = desktop.send_slot.clone().acquire_owned().await?;
                     let transfer_id = presentation.as_ref().map(|transfer| transfer.id);
+                    let measured_size = presentation
+                        .as_ref()
+                        .filter(|_| desktop.diagnostics)
+                        .map(|transfer| transfer.total);
                     if let Some(transfer) = presentation {
                         desktop.ui.transfer(0, transfer);
                     }
@@ -712,6 +719,7 @@ impl Link<'_> {
                         send.write_u64(id.get()).await
                     })
                     .await??;
+                    let timing = measured_size.map(|bytes| (bytes, Instant::now()));
                     transfer::send(&mut send, prepared, |bytes| {
                         desktop.update_peer(index, |s| s.progress.bytes = bytes);
                         if let Some(id) = transfer_id {
@@ -722,6 +730,9 @@ impl Link<'_> {
                     })
                     .await?;
                     send.finish()?;
+                    if let Some((bytes, started)) = timing {
+                        report_file_speed("sender_submission", bytes, started);
+                    }
                     Ok(slot)
                 }));
                 Ok(())
@@ -981,6 +992,11 @@ impl Link<'_> {
         }
         let id = incoming.offer.revision.counter;
         let layout = incoming.offer.layout.clone();
+        let measured_size = if self.desktop.diagnostics && layout.is_file() {
+            layout.total().ok()
+        } else {
+            None
+        };
         let status = self.desktop.status.clone();
         let ui = self.desktop.ui.clone();
         let transfer = incoming.transfer;
@@ -994,15 +1010,18 @@ impl Link<'_> {
                 let _ = receive.stop(0u32.into());
                 return Ok(None);
             }
-            Ok(Some(
-                transfer::receive(&mut receive, &layout, directory.as_deref(), |bytes| {
-                    status.send_modify(|s| s.received.bytes = bytes);
-                    if let Some(id) = transfer {
-                        ui.update_transfer(1, id, |transfer| transfer.bytes = bytes);
-                    }
-                })
-                .await?,
-            ))
+            let timing = measured_size.map(|bytes| (bytes, Instant::now()));
+            let data = transfer::receive(&mut receive, &layout, directory.as_deref(), |bytes| {
+                status.send_modify(|s| s.received.bytes = bytes);
+                if let Some(id) = transfer {
+                    ui.update_transfer(1, id, |transfer| transfer.bytes = bytes);
+                }
+            })
+            .await?;
+            if let Some((bytes, started)) = timing {
+                report_file_speed("receiver_verified", bytes, started);
+            }
+            Ok(Some(data))
         }));
     }
 
@@ -1204,6 +1223,19 @@ fn transfer_view(layout: &Layout, peer: &str) -> Result<Option<Transfer>> {
         bytes: 0,
         total,
     }))
+}
+
+fn report_file_speed(measurement: &'static str, bytes: u64, started: Instant) {
+    let elapsed = started.elapsed();
+    let mb_per_sec = bytes as f64 / elapsed.as_micros().max(1) as f64;
+    info!(
+        target: "unikvm::diagnostics",
+        measurement,
+        bytes,
+        elapsed_us = elapsed.as_micros() as u64,
+        mb_per_sec,
+        "file transfer throughput"
+    );
 }
 
 async fn poll_job<T>(job: &mut Option<Job<T>>) -> Result<T> {

@@ -7,6 +7,8 @@ use unikvm_network::{PeerEndpoint, identity::Fingerprint};
 mod receive;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod send;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod timing;
 
 pub struct Control {
     connections: watch::Receiver<Option<quinn::Connection>>,
@@ -15,10 +17,15 @@ pub struct Control {
     side: Option<PeerSide>,
     allow_locked_receive: bool,
     file_drag: bool,
+    diagnostics: bool,
 }
 
 impl Control {
-    pub fn new(config: &InputConfig, endpoint: Option<&PeerEndpoint>) -> Result<Self> {
+    pub fn new(
+        config: &InputConfig,
+        endpoint: Option<&PeerEndpoint>,
+        diagnostics: bool,
+    ) -> Result<Self> {
         if !cfg!(any(target_os = "windows", target_os = "macos")) {
             bail!("input sharing is available on Windows and macOS");
         }
@@ -33,6 +40,7 @@ impl Control {
             side: config.peer_side,
             allow_locked_receive: config.allow_locked_receive,
             file_drag: config.file_drag,
+            diagnostics,
         })
     }
 
@@ -104,6 +112,7 @@ impl Control {
                     self.peer,
                     &focus,
                     (None, None),
+                    self.diagnostics,
                 )
                 .await
             }
@@ -119,6 +128,7 @@ impl Control {
                         allow_locked_receive: self.allow_locked_receive,
                         native: None,
                         remote_drag: None,
+                        diagnostics: self.diagnostics,
                     },
                 )
                 .await
@@ -127,8 +137,8 @@ impl Control {
                 let control = capture.control().clone();
                 let signals = capture.shortcuts.clone();
                 tokio::select! {
-                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, (edge.map(|edge| edge.side), local_drag)) => result,
-                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive, native, remote_drag: (cfg!(target_os = "macos") && self.file_drag).then_some(desktop) }) => result,
+                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, (edge.map(|edge| edge.side), local_drag), self.diagnostics) => result,
+                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive, native, remote_drag: (cfg!(target_os = "macos") && self.file_drag).then_some(desktop), diagnostics: self.diagnostics }) => result,
                 }
             }
         }
@@ -143,6 +153,7 @@ impl Control {
             self.side,
             self.allow_locked_receive,
             self.file_drag,
+            self.diagnostics,
         );
         bail!("input sharing is available on Windows and macOS")
     }

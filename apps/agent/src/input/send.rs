@@ -13,7 +13,7 @@ use unikvm_protocol::input::{
     HEARTBEAT_INTERVAL, HEARTBEAT_TOKENS, LEASE, REQUEST,
 };
 
-use super::Focus;
+use super::{Focus, timing::SendProbes};
 use crate::desktop::{Drag, NativeDrops, OutboundDrag};
 
 const WRITE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -36,6 +36,7 @@ struct SendOptions<'a> {
     side: Option<Edge>,
     drag: Option<(PathBuf, &'a broadcast::Sender<OutboundDrag>)>,
     returns: Option<&'a NativeDrops>,
+    diagnostics: bool,
 }
 
 struct ReturnTarget<'a> {
@@ -48,6 +49,7 @@ struct ReturnTarget<'a> {
 struct ActiveMode<'a> {
     native: bool,
     returns: Option<ReturnTarget<'a>>,
+    diagnostics: bool,
 }
 
 pub async fn run(
@@ -56,6 +58,7 @@ pub async fn run(
     peer: Fingerprint,
     state: &Cell<FocusState>,
     (side, mut drags): (Option<Edge>, Option<DragSender>),
+    diagnostics: bool,
 ) -> Result<()> {
     let mut requested = 0;
     let mut generation = 0_u64;
@@ -115,6 +118,7 @@ pub async fn run(
                 side,
                 drag,
                 returns,
+                diagnostics,
             },
         )
         .await;
@@ -146,6 +150,7 @@ async fn control(
         side,
         drag,
         returns,
+        diagnostics,
     } = options;
     let native = drag.is_some();
     let (mut send, mut recv, mut initial_heartbeat) = tokio::select! {
@@ -214,6 +219,7 @@ async fn control(
         initial_heartbeat,
         ActiveMode {
             native,
+            diagnostics,
             returns: returns.zip(side).map(|(drops, side)| ReturnTarget {
                 drops,
                 side,
@@ -261,7 +267,12 @@ async fn active(
     initial_heartbeat: Option<Instant>,
     mode: ActiveMode<'_>,
 ) -> Result<ControlEnd> {
-    let ActiveMode { native, returns } = mode;
+    let ActiveMode {
+        native,
+        returns,
+        diagnostics,
+    } = mode;
+    let mut probes = diagnostics.then(SendProbes::new);
     let stop = shortcut.stop;
     let mut heartbeat = interval_at(
         initial_heartbeat.map_or_else(Instant::now, |sent| sent + HEARTBEAT_INTERVAL),
@@ -272,7 +283,7 @@ async fn active(
     tokio::pin!(deadline);
     let mut sequence = u8::from(initial_heartbeat.is_some());
     let mut pending = [None; HEARTBEAT_TOKENS as usize];
-    pending[0] = initial_heartbeat;
+    pending[0] = initial_heartbeat.map(|sent| (sent, None));
     let mut started = false;
     let mut peer_stopped = false;
     let mut returned: Option<ReturningDrag> = None;
@@ -323,9 +334,12 @@ async fn active(
                     return Ok(ControlEnd::NativeReturn);
                 }
                 ensure!((HEARTBEAT_ACK..HEARTBEAT_ACK + HEARTBEAT_TOKENS).contains(&ack[0]), "invalid input acknowledgment");
-                let sent = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected peer input acknowledgment")?;
+                let (sent, sample) = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected peer input acknowledgment")?;
                 let expires = sent + LEASE;
                 ensure!(expires > Instant::now(), "peer input acknowledgment arrived after the lease expired");
+                if let (Some(probes), Some(kind)) = (&mut probes, sample) {
+                    probes.latencies.record(kind, sent);
+                }
                 if !peer_stopped {
                     if expires > deadline.deadline() {
                         deadline.as_mut().reset(expires);
@@ -351,12 +365,25 @@ async fn active(
             _ = heartbeat.tick(), if !peer_stopped => {
                 let token = sequence;
                 sequence = (sequence + 1) % HEARTBEAT_TOKENS;
-                pending[usize::from(token)] = Some(Instant::now());
+                pending[usize::from(token)] = Some((Instant::now(), None));
                 Frame::Heartbeat(token)
             },
             event = capture.events.recv(), if !peer_stopped => Frame::Event(event.context("local input capture stopped")?),
         };
 
+        // An existing heartbeat immediately after a sampled event measures the
+        // receiver's acknowledgment of that ordered input on any peer build.
+        let probe = if let (Frame::Event(event), Some(probes)) = (frame, &mut probes) {
+            let now = Instant::now();
+            probes.sample(event, now).map(|kind| {
+                let token = sequence;
+                sequence = (sequence + 1) % HEARTBEAT_TOKENS;
+                pending[usize::from(token)] = Some((now, Some(kind)));
+                token
+            })
+        } else {
+            None
+        };
         let written = tokio::select! {
             biased;
             () = wait_stop(&mut capture.shortcuts, stop) => {
@@ -364,7 +391,13 @@ async fn active(
                 let _ = send.reset(0u32.into());
                 anyhow::bail!("input capture stopped during a stream write");
             }
-            result = timeout(WRITE_TIMEOUT, input::write(send, frame)) => result.context("input stream stalled")?,
+            result = timeout(WRITE_TIMEOUT, async {
+                input::write(send, frame).await?;
+                if let Some(token) = probe {
+                    input::write(send, Frame::Heartbeat(token)).await?;
+                }
+                std::io::Result::Ok(())
+            }) => result.context("input stream stalled")?,
         };
         if let Err(error) = written {
             if shortcut.edge_height.is_some()

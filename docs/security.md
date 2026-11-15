@@ -30,6 +30,8 @@ Treat mDNS, IP addresses, hostnames, and advertised IDs as untrusted hints. Pair
 
 Use reliable streams for key and button state and bound every message, stream, and queue. Leases and disconnect paths must restore local control and release held synthetic state. Logs may contain operational state and counts. Keep key data, clipboard contents, and secrets out of logs.
 
+Opt-in performance diagnostics add aggregate timings by input category and elapsed time and byte counts for completed file streams. They record no key identities, pointer coordinates, filenames, paths, or clipboard contents. Diagnostics use the existing authenticated input stream and add no remote configuration or access.
+
 UniKVM streams accepted payloads on a separate QUIC stream and verifies their byte count and BLAKE3 digest. Received files go in randomly named staging directories inside the user’s local profile on Windows or the private IPC directory on macOS. It validates each remote basename, creates each staged file without replacing an existing file, and exposes only completed batches to the native clipboard. The operating system or receiving app handles placement and naming when the user pastes.
 
 The Windows native drop preview takes an existing, single-file offer from the same pinned clipboard connection. Its same-user IPC exposes metadata and a local offer ID. Explorer requests the contents after release. The agent resolves the request against the active offer, uses the normal receiver approval, and returns a staging path only after verifying the payload. The helper reports completion against the same ID. The native drop leaves the receiving clipboard intact. Drop metadata, paths, and contents stay out of logs.

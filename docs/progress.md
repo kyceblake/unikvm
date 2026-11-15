@@ -1,5 +1,12 @@
 # Progress
 
+## Performance baseline and optimization
+
+- The operator confirmed the paired file-sharing checks passed. Phase 6 now defines a performance baseline before tuning and release hardening.
+- Added opt-in `diagnostics = true` for the regular agent, including release builds. It logs sampled input acknowledgment round trips, receiver native posting times, and sender and verified receiver file throughput. The existing peer protocol and input pacing remain compatible. [Measurement definitions and baseline procedure](performance.md)
+- Windows formatting, strict Clippy, 80 workspace tests, and debug and release builds passed. The Apple Silicon workspace passed strict Clippy at compile time.
+- Next, record Windows ↔ macOS latency and verified receiver throughput with release builds, at idle and during a 50 MB transfer. Use those measurements to choose the first optimization.
+
 ## File verification and drag edge visibility
 
 - Both trays show the result of the existing BLAKE3 verification for received files. The receiver reports a match after publishing the clipboard or completing the native drop. The sender reports a match after the peer's success receipt. [Clipboard file verification](clipboard-sync.md#use-the-tray-and-menu-bar)

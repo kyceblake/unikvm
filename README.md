@@ -27,3 +27,5 @@ log_level = "info"
 ```
 
 Follow [manual pairing](docs/manual-pairing.md) to connect two devices, then use the [Windows and Mac input walkthrough](docs/input-control.md) to enable bidirectional sharing. The [clipboard setup](docs/clipboard-sync.md) covers text, images, and the transfer monitor. See [progress and verification](docs/progress.md), [architecture](docs/architecture.md), [platform support and probe commands](docs/platform-support.md), and [dependency decisions](docs/dependencies.md).
+
+To record input latency and file transfer throughput, enable [performance diagnostics](docs/performance.md).
