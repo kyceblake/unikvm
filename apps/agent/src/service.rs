@@ -8,7 +8,13 @@ use tracing::{debug, info, warn};
 use unikvm_config::Config;
 use unikvm_network::PeerEvent;
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
-use unikvm_protocol::local::{ClipboardStatus, Status, respond_with_clipboard};
+use unikvm_protocol::local::{ClipboardStatus, Status, respond_with_transfers};
+
+struct ClipboardIpc {
+    status: tokio::sync::watch::Receiver<ClipboardStatus>,
+    offer: tokio::sync::watch::Receiver<Option<unikvm_protocol::local::Approval>>,
+    decisions: tokio::sync::mpsc::Sender<unikvm_protocol::local::ApprovalDecision>,
+}
 
 pub async fn run(config: &Config) -> Result<()> {
     let started = Instant::now();
@@ -25,10 +31,19 @@ pub async fn run(config: &Config) -> Result<()> {
         .transpose()?;
     let (clipboard_status, clipboard_view) =
         tokio::sync::watch::channel(ClipboardStatus::default());
+    let (offer, offered) = tokio::sync::watch::channel(None);
+    let (decide, decisions) = tokio::sync::mpsc::channel(4);
+    let ipc = ClipboardIpc {
+        status: clipboard_view,
+        offer: offered,
+        decisions: decide,
+    };
     let _clipboard = config
         .clipboard
         .as_ref()
-        .map(|config| crate::clipboard::start(config, network.as_ref(), clipboard_status))
+        .map(|config| {
+            crate::clipboard::start(config, network.as_ref(), clipboard_status, offer, decisions)
+        })
         .transpose()?;
     let peer_service = network.map(|endpoint| {
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -46,7 +61,7 @@ pub async fn run(config: &Config) -> Result<()> {
     info!(pid, "local agent ready");
 
     let local = async {
-        let local = serve(&mut listener, shutdown, pid, started, clipboard_view);
+        let local = serve(&mut listener, shutdown, pid, started, ipc);
         let control = async {
             if let Some(control) = control
                 && let Err(error) = control.run().await
@@ -77,7 +92,7 @@ async fn serve(
     mut shutdown: tokio::task::JoinHandle<io::Result<()>>,
     pid: u32,
     started: Instant,
-    clipboard: tokio::sync::watch::Receiver<ClipboardStatus>,
+    clipboard: ClipboardIpc,
 ) -> Result<()> {
     loop {
         let stream = tokio::select! {
@@ -87,13 +102,29 @@ async fn serve(
             }
             result = listener.accept() => result.context("accept local connection")?,
         };
-        let exchange = respond_with_clipboard(
+        let exchange = respond_with_transfers(
             stream,
             || Status {
                 pid,
                 uptime_secs: started.elapsed().as_secs(),
             },
-            || *clipboard.borrow(),
+            || *clipboard.status.borrow(),
+            |id| {
+                clipboard
+                    .offer
+                    .borrow()
+                    .as_ref()
+                    .filter(|offer| offer.id == id)
+                    .cloned()
+            },
+            |decision| {
+                clipboard
+                    .offer
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|offer| offer.id == decision.id)
+                    && clipboard.decisions.try_send(decision).is_ok()
+            },
         );
         tokio::select! {
             signal = &mut shutdown => {

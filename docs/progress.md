@@ -1,5 +1,11 @@
 # Progress
 
+## 2026-11-14 — Clipboard v5 file transfer
+
+- Clipboard copies up to 5 MB transfer automatically. Larger copies up to 50 MB require a native receiver prompt. Files have a separate opt-in. Completed files are staged privately and published to the native clipboard for pasting into an app or folder.
+- The Windows workspace build, strict Clippy and 62 standard tests passed. Tests covered a 50 MB batch, duplicate filenames, corrupt and truncated transfers, approval IPC, and simultaneous clipboard and input streams on authenticated loopback connections. Verified the Windows dialog’s Decline action. Apple Silicon and Linux cross-target Clippy and Cargo deny passed.
+- Next, update both desktops and verify the native paste in each direction, the automatic prompt with the monitor closed, and mouse and keyboard responsiveness during a 50 MB transfer. [Setup and test steps](clipboard-sync.md)
+
 ## 2026-11-14 — Native clipboard monitor
 
 - Replaced the browser monitor with a native Win32 window and an AppKit window. Run `unikvm clipboard` in the same desktop session as the agent. The CLI reads existing clipboard v4 status through local IPC.

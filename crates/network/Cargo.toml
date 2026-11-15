@@ -21,3 +21,6 @@ tracing.workspace = true
 unikvm-core.workspace = true
 unikvm-protocol.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+unikvm-transfer.workspace = true

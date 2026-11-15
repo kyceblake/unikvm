@@ -1,11 +1,17 @@
 #![allow(unsafe_code)]
 
-use std::io;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::ptr::null_mut;
+use std::{fs, io};
 
 use image::ImageFormat;
-use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BYTES};
+use unikvm_core::clipboard::{Content, MAX_FILES, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BYTES};
 use windows_sys::Win32::Foundation::{GlobalFree, HGLOBAL, HWND};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
+};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, GetClipboardSequenceNumber,
     IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -14,6 +20,8 @@ use windows_sys::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
 use windows_sys::Win32::System::Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT};
+use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows_sys::Win32::UI::Shell::{DROPFILES, DragQueryFileW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE};
 
 use super::{Snapshot, WriteOutcome, cf_html, imaging};
@@ -21,10 +29,12 @@ use crate::input::windows::check_input_desktop;
 
 pub struct Clipboard {
     exclude: u32,
+    imported: u32,
     history: u32,
     cloud: u32,
     html: u32,
     png: u32,
+    drop_effect: u32,
 }
 
 impl Clipboard {
@@ -36,10 +46,12 @@ impl Clipboard {
         let png = format("PNG")?;
         Ok(Self {
             exclude,
+            imported: format("UniKVM Received Clipboard")?,
             history,
             cloud,
             html,
             png,
+            drop_effect: format("Preferred DropEffect")?,
         })
     }
 
@@ -62,20 +74,26 @@ impl Clipboard {
             return Ok(None);
         }
         // SAFETY: All formats are registered or standard, and the clipboard is open.
-        let (mut content, image) = unsafe {
+        let (mut content, image, imported) = unsafe {
+            let imported = IsClipboardFormatAvailable(self.imported) != 0;
             if IsClipboardFormatAvailable(self.exclude) != 0
-                || IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0
+                || imported
                 || opt_out(self.history)
                 || opt_out(self.cloud)
             {
-                (None, None)
+                (None, None, imported)
             } else {
-                let text = if IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0 {
-                    read_text(MAX_TEXT_BYTES)?
-                } else {
-                    None
-                };
-                let image = if text.as_deref().is_none_or(str::is_empty) {
+                let has_files = IsClipboardFormatAvailable(u32::from(CF_HDROP)) != 0;
+                let text =
+                    if !has_files && IsClipboardFormatAvailable(u32::from(CF_UNICODETEXT)) != 0 {
+                        read_text(MAX_TEXT_BYTES)
+                    } else {
+                        Ok(None)
+                    };
+                let image = if text
+                    .as_ref()
+                    .is_ok_and(|text| text.as_deref().is_none_or(str::is_empty))
+                {
                     [self.png, u32::from(CF_DIBV5), u32::from(CF_DIB)]
                         .into_iter()
                         .find_map(|format| {
@@ -89,11 +107,25 @@ impl Clipboard {
                 } else {
                     None
                 };
-                let content = text.map(|plain| Content::Text {
-                    plain,
-                    html: read_html(self.html, MAX_HTML_BYTES),
-                });
-                (content, image)
+                let content = if has_files {
+                    read_files().map(Content::Files)
+                } else {
+                    match text {
+                        Ok(Some(plain)) => match read_html(self.html, MAX_HTML_BYTES) {
+                            Ok(html) => Some(Content::Text { plain, html }),
+                            Err(error) if error.kind() == io::ErrorKind::FileTooLarge => {
+                                Some(Content::TooLarge)
+                            }
+                            Err(error) => return Err(error),
+                        },
+                        Ok(None) => None,
+                        Err(error) if error.kind() == io::ErrorKind::FileTooLarge => {
+                            Some(Content::TooLarge)
+                        }
+                        Err(error) => return Err(error),
+                    }
+                };
+                (content, image, imported)
             }
         };
         let sequence = self.sequence()?;
@@ -108,7 +140,11 @@ impl Clipboard {
                 content = Some(Content::Png(png));
             }
         }
-        Ok((self.sequence()? == sequence).then_some(Snapshot { sequence, content }))
+        Ok((self.sequence()? == sequence).then_some(Snapshot {
+            sequence,
+            content,
+            imported,
+        }))
     }
 
     pub fn write(&self, expected: u64, content: &Content) -> io::Result<WriteOutcome> {
@@ -135,8 +171,15 @@ impl Clipboard {
                 let png = Memory::new(&png)?;
                 (u32::from(CF_DIBV5), data, Some((self.png, png)))
             }
+            Content::Files(paths) => (
+                u32::from(CF_HDROP),
+                file_drop(paths)?,
+                Some((self.drop_effect, Memory::new(&[1u32])?)),
+            ),
+            Content::TooLarge => return Ok(WriteOutcome::Unsupported),
         };
         let excluded = Memory::new(&[0u8])?;
+        let imported = Memory::new(&[0u8])?;
         let owner = Owner::new()?;
         let _clipboard = Open::new(owner.0)?;
         if self.sequence()? != expected {
@@ -147,6 +190,7 @@ impl Clipboard {
             return Err(io::Error::last_os_error());
         }
         excluded.publish(self.exclude)?;
+        imported.publish(self.imported)?;
         if let Some((format, extra)) = extra {
             let _ = extra.publish(format);
         }
@@ -156,6 +200,107 @@ impl Clipboard {
         // without also hiding a local copy that wins the race after close.
         Ok(WriteOutcome::Applied(self.sequence()?))
     }
+
+    pub fn imported_files(&self) -> io::Result<Option<Vec<PathBuf>>> {
+        let _clipboard = Open::new(null_mut())?;
+        // SAFETY: The clipboard lock keeps both representations live.
+        Ok(unsafe {
+            (IsClipboardFormatAvailable(self.imported) != 0)
+                .then(|| read_files())
+                .flatten()
+        })
+    }
+}
+
+pub fn staging_directory() -> io::Result<PathBuf> {
+    let mut session = 0;
+    // SAFETY: The process ID is current and the session output is writable.
+    if unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let user_dir = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|directory| directory.is_absolute())
+        .ok_or_else(|| io::Error::other("Windows user data directory is unavailable"))?;
+    let directory = user_dir
+        .join("Temp")
+        .join(format!("UniKVM-clipboard-{session}"));
+    match fs::create_dir(&directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = fs::symlink_metadata(&directory)?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    Ok(directory)
+}
+
+pub fn open_source(path: &Path) -> io::Result<fs::File> {
+    if !path.is_absolute()
+        || !matches!(path.components().next(),
+        Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+    {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
+}
+
+unsafe fn read_files() -> Option<Vec<PathBuf>> {
+    // SAFETY: The clipboard owns the HDROP until the lock is released.
+    unsafe { read_drop(GetClipboardData(u32::from(CF_HDROP))) }
+}
+
+unsafe fn read_drop(drop: HGLOBAL) -> Option<Vec<PathBuf>> {
+    // SAFETY: The caller supplies a live HDROP global memory block or null.
+    unsafe {
+        if drop.is_null() {
+            return None;
+        }
+        let count = DragQueryFileW(drop, u32::MAX, null_mut(), 0);
+        if !(1..=MAX_FILES as u32).contains(&count) {
+            return None;
+        }
+        (0..count)
+            .map(|index| {
+                let length = DragQueryFileW(drop, index, null_mut(), 0);
+                if !(1..=32_767).contains(&length) {
+                    return None;
+                }
+                let mut buffer = vec![0; length as usize + 1];
+                if DragQueryFileW(drop, index, buffer.as_mut_ptr(), length + 1) != length {
+                    return None;
+                }
+                Some(PathBuf::from(std::ffi::OsString::from_wide(
+                    &buffer[..length as usize],
+                )))
+            })
+            .collect()
+    }
+}
+
+fn file_drop(paths: &[PathBuf]) -> io::Result<Memory> {
+    // DROPFILES contains five DWORDs. Keep the offsets independent of pointer size.
+    let mut data = Vec::new();
+    for field in [size_of::<DROPFILES>() as u32, 0, 0, 0, 1] {
+        data.extend_from_slice(&field.to_le_bytes());
+    }
+    for path in paths {
+        for unit in path.as_os_str().encode_wide().chain([0]) {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    data.extend_from_slice(&[0, 0]);
+    Memory::new(&data)
 }
 
 unsafe fn read_bytes(format: u32, limit: usize) -> Option<Vec<u8>> {
@@ -182,24 +327,34 @@ unsafe fn read_bytes(format: u32, limit: usize) -> Option<Vec<u8>> {
     }
 }
 
-unsafe fn read_html(format: u32, limit: usize) -> Option<String> {
+unsafe fn read_html(format: u32, limit: usize) -> io::Result<Option<String>> {
     // SAFETY: The caller holds the clipboard lock. GlobalSize bounds the
     // readable bytes, and the returned string owns its data before unlock.
     unsafe {
         if IsClipboardFormatAvailable(format) == 0 {
-            return None;
+            return Ok(None);
         }
         let handle = GetClipboardData(format);
         if handle.is_null() {
-            return None;
+            return Ok(None);
         }
-        let bytes = GlobalSize(handle).min(limit.saturating_add(cf_html::MAX_HEADER_BYTES));
+        let bytes = GlobalSize(handle);
+        if bytes > limit.saturating_add(cf_html::MAX_HEADER_BYTES) {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
         let data = GlobalLock(handle).cast::<u8>();
         if data.is_null() {
-            return None;
+            return Ok(None);
         }
-        let fragment =
-            cf_html::decode(std::slice::from_raw_parts(data, bytes), limit).map(str::to_owned);
+        let fragment = cf_html::decode(std::slice::from_raw_parts(data, bytes), bytes)
+            .map(|fragment| {
+                if fragment.len() > limit {
+                    Err(io::ErrorKind::FileTooLarge.into())
+                } else {
+                    Ok(fragment.to_owned())
+                }
+            })
+            .transpose();
         GlobalUnlock(handle);
         fragment
     }
@@ -301,18 +456,20 @@ unsafe fn read_text(limit: usize) -> io::Result<Option<String>> {
         if handle.is_null() {
             return Err(io::Error::last_os_error());
         }
-        let units = (GlobalSize(handle) / size_of::<u16>()).min(limit.saturating_add(1));
+        let length = GlobalSize(handle) / size_of::<u16>();
+        let units = length.min(limit.saturating_add(1));
         let data = GlobalLock(handle).cast::<u16>();
         if data.is_null() {
             return Err(io::Error::last_os_error());
         }
         let units = std::slice::from_raw_parts(data, units);
-        let text = units
-            .iter()
-            .position(|&unit| unit == 0)
-            .and_then(|end| String::from_utf16(&units[..end]).ok())
-            .filter(|text| text.len() <= limit);
+        let end = units.iter().position(|&unit| unit == 0);
+        let text = end.and_then(|end| String::from_utf16(&units[..end]).ok());
         GlobalUnlock(handle);
+        if (end.is_none() && length > limit) || text.as_ref().is_some_and(|text| text.len() > limit)
+        {
+            return Err(io::ErrorKind::FileTooLarge.into());
+        }
         Ok(text)
     }
 }
@@ -362,6 +519,17 @@ mod tests {
     use super::*;
     use windows_sys::Win32::System::DataExchange::{CountClipboardFormats, EnumClipboardFormats};
     use windows_sys::Win32::System::Ole::{CF_LOCALE, CF_OEMTEXT, CF_TEXT};
+
+    #[test]
+    fn native_file_drop_preserves_multiple_unicode_paths() {
+        let paths = vec![
+            PathBuf::from(r"C:\Clipboard\写真.png"),
+            PathBuf::from(r"C:\Clipboard\report.test"),
+        ];
+        let block = file_drop(&paths).unwrap();
+        // SAFETY: The prepared DROPFILES global memory block remains live.
+        assert_eq!(unsafe { read_drop(block.0) }.unwrap(), paths);
+    }
 
     #[test]
     #[ignore = "requires an interactive desktop with an empty clipboard"]
@@ -447,7 +615,12 @@ mod tests {
         let open = Open::new(null_mut()).unwrap();
         // SAFETY: Read the test string directly from the currently open clipboard.
         assert!(unsafe { read_text(64 * 1024) }.unwrap().as_deref() == Some(TEXT));
-        assert!(unsafe { read_html(clipboard.html, 64 * 1024) }.as_deref() == Some(html));
+        assert!(
+            unsafe { read_html(clipboard.html, 64 * 1024) }
+                .unwrap()
+                .as_deref()
+                == Some(html)
+        );
         drop(open);
         let pixels = image::RgbaImage::from_pixel(2, 3, image::Rgba([20, 80, 120, 64]));
         let png = imaging::to_png(&pixels).unwrap();

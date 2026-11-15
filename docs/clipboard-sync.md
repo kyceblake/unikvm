@@ -1,19 +1,20 @@
-# Share text, HTML, and images between Windows and Mac
+# Share text, HTML, images, and files between Windows and Mac
 
 Use a working [paired connection](manual-pairing.md) and a clipboard-enabled build on both machines. Add this table to each machine's `local-pairing/agent.toml`, using the other machine's pinned fingerprint. If you already use input sharing, copy the value from that machine's `[input]` table.
 
 ```toml
 [clipboard]
 peer_fingerprint = "OTHER_DEVICE_FINGERPRINT"
+files = true
 ```
 
-Update and restart both agents, then wait for `clipboard sync connected` in both logs. Both builds must speak clipboard protocol version 4. On macOS, allow pasteboard access if macOS prompts. With both desktops unlocked, copy a formatted paragraph from a browser on Windows. Paste it into a Mac rich-text editor and then a plain-text editor. Repeat from Mac to Windows. Clipboard sharing works independently of which machine currently receives mouse and keyboard input. [Apple pasteboard access](https://developer.apple.com/documentation/appkit/nspasteboard/accessbehavior-swift.enum)
+Build the workspace with `cargo build --locked --workspace` so the agent and native prompt helper are in the same directory. Restart both agents and wait for `clipboard sync connected`. Both agents need clipboard protocol version 5. File copying requires `files = true` on both peers. You can omit that option to share text, HTML, and images. On macOS, allow pasteboard access if macOS prompts. Clipboard sharing works independently of which machine currently receives mouse and keyboard input. [Apple pasteboard access](https://developer.apple.com/documentation/appkit/nspasteboard/accessbehavior-swift.enum)
 
-The limits are 64 KiB of UTF-8 plain text and 64 KiB of optional HTML per copy. The Windows adapter transfers the selected HTML fragment, so formatting that depends on styles outside the selection can be lost. The receiving editor controls which markup it imports.
+Copies of up to **5 MB** transfer automatically. Copies over **5 MB** and up to **50 MB** show a native **Receive** or **Decline** prompt. The offer expires after 60 seconds. The size counts the whole copy, including multiple files or both plain text and HTML. MB here means 1,000,000 bytes. The Windows adapter transfers the selected HTML fragment, and the receiving editor controls which markup it imports.
 
-To test images, use the browser's **Copy Image** command or copy a small screenshot to the clipboard. On Mac, use **Control+Shift+Command+4** and select a region. Paste into Paint on Windows or use **File → New from Clipboard** in Preview on Mac. The wire format is PNG, limited to 8 MiB, 4096 pixels per side, and 9,437,184 pixels total. Windows reads PNG and DIB and publishes PNG and DIBV5. macOS reads PNG, TIFF, and JPEG and publishes PNG and TIFF. On Mac, a supported raster image takes priority over captions and auxiliary pasteboard items. Telegram's **Copy Media** can supply both a raster image and a file reference. UniKVM uses the supplied image data, so it can paste into an image editor. On Windows, nonempty text takes priority.
+To paste image pixels into an editor, use **Copy Image** or copy a screenshot. Paste into Paint on Windows or use **File → New from Clipboard** in Preview on Mac. UniKVM encodes images from apps as PNG, with limits of 4096 pixels per side and 9,437,184 pixels total. Windows reads PNG and DIB and publishes PNG and DIBV5. macOS reads PNG, TIFF, and JPEG and publishes PNG and TIFF. If an app supplies a raster image with an auxiliary file reference, UniKVM uses the image so it can paste into an image editor.
 
-Copying a JPEG file in Finder or Explorer uses a file reference and requires Phase 5 file transfer. To copy the image from a JPEG on Mac today, open it in Preview, select the image with **Command+A**, then copy it with **Command+C**.
+To copy the original file, select it in Explorer or Finder and copy it. When the receiver shows **Ready to paste here**, paste into an open folder or an app that accepts files. UniKVM stages the files locally and passes their paths to the receiving OS. The folder or app handles the paste. Up to 32 regular files can go in one copy. For example, a PNG copied as a file keeps its original bytes and bypasses the image pixel limits. Folder selections and app-specific virtual files are outside this release.
 
 The agent sends new copies made after the clipboard session starts and skips entries with supported sensitive-content markers. Remove the `[clipboard]` table and restart either agent to pause sharing.
 
@@ -25,6 +26,6 @@ On either desktop, run this in a separate terminal while the agent is running.
 cargo run --locked -p unikvm-cli -- clipboard
 ```
 
-The command opens a native desktop window with separate rows for outgoing and incoming copies. The bar moves while a copy is pending. Quick copies may go straight to the result. **Ready to paste here** means the agent successfully wrote to this computer’s clipboard. The sender shows **Ready to paste on the other computer** after it receives confirmation. **This clipboard entry was skipped** can appear for copies such as Finder file references, unsupported formats, or privacy-marked items.
+The command opens a native desktop window with outgoing and incoming rows. It shows when a copy is waiting for approval and displays the number of bytes transferred. The approval prompt opens even with the monitor closed. **Ready to paste here** means the agent successfully wrote to this computer’s clipboard. The sender shows **Ready to paste on the other computer** after it receives confirmation.
 
-To check both directions, open the monitor on each machine, copy a large image from Preview or a Windows image editor, and wait for **Ready to paste here** before pasting. Repeat from the other machine. Close the window when you’re done. The agents continue sharing the clipboard.
+Test both directions with a small file and a file over 5 MB. Decline a large offer and verify the receiving clipboard keeps its prior content. Repeat with **Receive**, wait for **Ready to paste here**, then paste into a folder and compare the file with the original.

@@ -9,7 +9,10 @@ mod desktop {
     use tokio::time::{MissedTickBehavior, interval, timeout};
     use unikvm_platform::clipboard_monitor::{self, Row, View};
     use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
-    use unikvm_protocol::local::{ClipboardPhase, ClipboardStatus, query_clipboard};
+    use unikvm_protocol::local::{
+        ApprovalDecision, ClipboardPhase, ClipboardStatus, Progress, approval, decide,
+        query_clipboard,
+    };
 
     enum Direction {
         Outgoing,
@@ -52,6 +55,30 @@ mod desktop {
         result.context("show native clipboard monitor")
     }
 
+    pub fn prompt(id: u64) -> Result<()> {
+        let endpoint = Endpoint::for_current_user()?;
+        let runtime = Builder::new_current_thread().enable_all().build()?;
+        let offer = runtime.block_on(async {
+            timeout(STATUS_TIMEOUT, async {
+                let mut stream = endpoint.connect().await?;
+                approval(&mut stream, id).await
+            })
+            .await?
+        })?;
+        let Some(offer) = offer else {
+            return Ok(());
+        };
+        let accept = clipboard_monitor::approve(&offer.label, offer.bytes)?;
+        runtime.block_on(async {
+            timeout(STATUS_TIMEOUT, async {
+                let mut stream = endpoint.connect().await?;
+                decide(&mut stream, ApprovalDecision { id, accept }).await
+            })
+            .await?
+        })?;
+        Ok(())
+    }
+
     async fn read_status(endpoint: &Endpoint) -> Option<ClipboardStatus> {
         timeout(STATUS_TIMEOUT, async {
             let mut stream = endpoint.connect().await?;
@@ -72,14 +99,14 @@ mod desktop {
         View {
             connection,
             rows: [
-                row(Direction::Outgoing, state.outgoing),
-                row(Direction::Incoming, state.incoming),
+                row(Direction::Outgoing, state.outgoing, state.sent),
+                row(Direction::Incoming, state.incoming, state.received),
             ],
         }
     }
 
-    fn row(direction: Direction, phase: ClipboardPhase) -> Row {
-        use ClipboardPhase::{Copying, Failed, Idle, Ready, Skipped};
+    fn row(direction: Direction, phase: ClipboardPhase, progress: Progress) -> Row {
+        use ClipboardPhase::{Copying, Declined, Failed, Idle, Ready, Skipped, TooLarge, Waiting};
         use Direction::{Incoming, Outgoing};
 
         let text = match (direction, phase) {
@@ -91,18 +118,28 @@ mod desktop {
             (Outgoing, Failed) => "Copy couldn’t be confirmed",
             (Incoming, Failed) => "Couldn’t put the copy on this clipboard",
             (_, Skipped) => "This clipboard entry was skipped",
+            (_, Waiting) => "Waiting for approval",
+            (_, TooLarge) => "Copy exceeds the 50 MB limit",
+            (_, Declined) => "Copy declined",
         };
         Row {
             text,
             copying: phase == Copying,
+            bytes: progress.bytes,
+            total: progress.total,
         }
     }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub use desktop::open;
+pub use desktop::{open, prompt};
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn open() -> anyhow::Result<()> {
     anyhow::bail!("the native clipboard monitor is available on Windows and macOS");
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn prompt(_: u64) -> anyhow::Result<()> {
+    open()
 }

@@ -11,6 +11,8 @@ workspace = true
 [features]
 clipboard-monitor = [
     "objc2-app-kit/NSApplication",
+    "objc2-app-kit/NSAlert",
+    "objc2-app-kit/NSButton",
     "objc2-app-kit/NSColor",
     "objc2-app-kit/NSControl",
     "objc2-app-kit/NSFont",
@@ -40,7 +42,7 @@ foreign-types.workspace = true
 image = { workspace = true, features = ["jpeg", "png", "tiff"] }
 objc2.workspace = true
 objc2-app-kit = { workspace = true, features = ["std", "NSPasteboard", "NSPasteboardItem"] }
-objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSData", "NSString"] }
+objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSData", "NSString", "NSURL"] }
 unikvm-core.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
@@ -57,6 +59,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_DataExchange",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_EventLog",
     "Win32_System_Pipes",
@@ -66,6 +69,7 @@ windows-sys = { workspace = true, features = [
     "Win32_System_StationsAndDesktops",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

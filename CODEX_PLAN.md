@@ -55,12 +55,12 @@ Work **incrementally**. Begin with a feasibility and repository foundation miles
 
 6. **Large files with user approval**
    - File copies create metadata-only offers rather than eagerly transferring data.
-   - Require explicit approval before receiving files; make the approval usable without an open TUI, via a suitable native notification/dialog helper where supported.
+   - With file sharing enabled on both peers, receive copies up to 5 MB automatically. Show a native approval prompt for larger clipboard copies up to the 50 MB total limit.
    - Stream data with bounded buffers over dedicated reliable QUIC streams.
    - Support multiple files, progress, cancellation, BLAKE3 integrity checks, and safe temporary/staging paths.
    - Add resumable transfers after the basic transfer path is correct.
    - Normalize filenames and prevent path traversal/symlink escape; never overwrite existing files silently.
-   - Start with an approved destination folder; native cross-platform file-paste integration is a later milestone.
+   - Stage completed files privately and let the receiving OS paste them into an app or a user-selected folder.
 
 ### P1 — operational quality
 
@@ -237,10 +237,10 @@ The schema must be versioned and forward-compatible. All fields from untrusted p
 
 ### Phase 5 — file offers and large transfers
 
-- Add metadata-only clipboard file offers, recipient confirmation, chunked streaming, staging, progress, cancellation, verification.
-- Test files larger than available RAM; then add resume support and native paste integration.
+- Add metadata-only clipboard offers, size-based recipient confirmation, chunked streaming, staging, progress, cancellation, verification, and native file paste.
+- Verify the 50 MB limit and input responsiveness during a full transfer. Resume support and larger transfers are later milestones.
 
-**Done when:** Transfers are bounded-memory, recipient-approved, verified, and never expose partial files as completed files.
+**Done when:** Transfers use bounded memory, obtain approval above 5 MB, verify copied data, and publish only complete batches.
 
 ### Phase 6 — hardening and first release
 

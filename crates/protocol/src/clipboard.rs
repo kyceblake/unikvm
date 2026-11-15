@@ -1,307 +1,271 @@
-//! Versioned, bounded text and PNG clipboard updates.
+//! Clipboard control records. Bulk payloads use a separate QUIC stream.
 
 use std::io;
 use std::num::NonZeroU64;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use unikvm_core::clipboard::{
-    Content, MAX_HTML_BYTES, MAX_PNG_BYTES, MAX_TEXT_BYTES, PNG_SIGNATURE,
-};
+use unikvm_core::clipboard::{AUTO_BYTES, MAX_BYTES, MAX_FILES};
 use unikvm_core::device::DeviceId;
 
-const HEADER: &[u8; 8] = b"CLIP/4\r\n";
-const RECEIPT: &[u8; 8] = b"CLIP/4 A";
-pub const READY: &[u8; 8] = b"CLIP/4\n\n";
+pub const READY: &[u8] = b"CLIP/5\n";
+pub const DATA: &[u8] = b"CLIP-DATA/5\n";
+pub const MAX_NAME_BYTES: usize = 240;
 
-/// Order concurrent writes by logical counter, then by device ID.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Revision {
     pub counter: NonZeroU64,
     pub origin: DeviceId,
 }
 
-// Clipboard contents should never be formatted into diagnostics.
-pub struct Update {
-    revision: Revision,
-    content: Content,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOffer {
+    pub name: String,
+    pub size: u64,
 }
 
-pub enum Record {
-    Update(Update),
-    Receipt(Receipt),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Layout {
+    Text { plain: u32, html: u32 },
+    Png(u32),
+    Files(Vec<FileOffer>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Receipt {
-    pub counter: NonZeroU64,
-    pub applied: bool,
-}
-
-impl Update {
-    pub fn new(revision: Revision, content: Content) -> io::Result<Self> {
-        match &content {
-            Content::Text { plain, html } => {
-                if plain.len() > MAX_TEXT_BYTES || plain.contains('\0') {
-                    return Err(invalid("invalid clipboard text"));
-                }
-                if html
-                    .as_ref()
-                    .is_some_and(|html| html.len() > MAX_HTML_BYTES || html.contains('\0'))
-                {
-                    return Err(invalid("invalid clipboard HTML"));
-                }
+impl Layout {
+    pub fn total(&self) -> io::Result<u64> {
+        let total = match self {
+            Self::Text { plain, html } => u64::from(*plain) + u64::from(*html),
+            Self::Png(size) if *size >= 8 => u64::from(*size),
+            Self::Files(files) if (1..=MAX_FILES).contains(&files.len()) => {
+                files.iter().try_fold(0_u64, |total, file| {
+                    if !valid_name(&file.name) {
+                        return Err(invalid());
+                    }
+                    total.checked_add(file.size).ok_or_else(invalid)
+                })?
             }
-            Content::Png(png) => {
-                if png.len() > MAX_PNG_BYTES || !png.starts_with(PNG_SIGNATURE) {
-                    return Err(invalid("invalid clipboard PNG"));
+            _ => return Err(invalid()),
+        };
+        if total > MAX_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "clipboard exceeds 50 MB",
+            ));
+        }
+        Ok(total)
+    }
+
+    pub fn requires_approval(&self) -> io::Result<bool> {
+        Ok(self.total()? > AUTO_BYTES)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub revision: Revision,
+    pub layout: Layout,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Control {
+    Offer(Offer),
+    Decision { id: NonZeroU64, accept: bool },
+    Receipt { id: NonZeroU64, applied: bool },
+    Withdraw(NonZeroU64),
+}
+
+pub fn valid_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.len() > MAX_NAME_BYTES
+        || name.ends_with(['.', ' '])
+        || name.chars().any(|ch| {
+            ch.is_control()
+                || "<>:\"/\\|?*".contains(ch)
+                || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+    {
+        return false;
+    }
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .trim_end()
+        .to_ascii_uppercase();
+    if matches!(
+        base.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return false;
+    }
+    !["COM", "LPT"].iter().any(|prefix| {
+        base.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
+    })
+}
+
+pub async fn write(writer: &mut (impl AsyncWrite + Unpin), control: &Control) -> io::Result<()> {
+    match control {
+        Control::Offer(offer) => {
+            offer.layout.total()?;
+            writer.write_u8(1).await?;
+            writer.write_u64(offer.revision.counter.get()).await?;
+            writer.write_all(&offer.revision.origin.0).await?;
+            match &offer.layout {
+                Layout::Text { plain, html } => {
+                    writer.write_u8(1).await?;
+                    writer.write_u32(*plain).await?;
+                    writer.write_u32(*html).await?;
+                }
+                Layout::Png(size) => {
+                    writer.write_u8(2).await?;
+                    writer.write_u32(*size).await?;
+                }
+                Layout::Files(files) => {
+                    writer.write_u8(3).await?;
+                    writer.write_u8(files.len() as u8).await?;
+                    for file in files {
+                        writer.write_u64(file.size).await?;
+                        writer.write_u8(file.name.len() as u8).await?;
+                        writer.write_all(file.name.as_bytes()).await?;
+                    }
                 }
             }
         }
-        Ok(Self { revision, content })
-    }
-
-    pub fn revision(&self) -> Revision {
-        self.revision
-    }
-
-    pub fn content(&self) -> &Content {
-        &self.content
-    }
-}
-
-pub async fn write(writer: &mut (impl AsyncWrite + Unpin), update: &Update) -> io::Result<()> {
-    let (plain, html, png) = match &update.content {
-        Content::Text { plain, html } => (
-            plain.as_bytes(),
-            html.as_deref().unwrap_or_default().as_bytes(),
-            &[][..],
-        ),
-        Content::Png(png) => (&[][..], &[][..], png.as_slice()),
-    };
-    let mut metadata = [0; 44];
-    metadata[..8].copy_from_slice(HEADER);
-    metadata[8..24].copy_from_slice(&update.revision.origin.0);
-    metadata[24..32].copy_from_slice(&update.revision.counter.get().to_be_bytes());
-    metadata[32..36].copy_from_slice(&(plain.len() as u32).to_be_bytes());
-    metadata[36..40].copy_from_slice(&(html.len() as u32).to_be_bytes());
-    metadata[40..44].copy_from_slice(&(png.len() as u32).to_be_bytes());
-    writer.write_all(&metadata).await?;
-    for bytes in [plain, html, png] {
-        if !bytes.is_empty() {
-            writer.write_all(bytes).await?;
+        Control::Decision { id, accept } => write_result(writer, 2, *id, *accept).await?,
+        Control::Receipt { id, applied } => write_result(writer, 3, *id, *applied).await?,
+        Control::Withdraw(id) => {
+            writer.write_u8(4).await?;
+            writer.write_u64(id.get()).await?;
         }
     }
     Ok(())
 }
 
-pub async fn write_receipt(
+async fn write_result(
     writer: &mut (impl AsyncWrite + Unpin),
-    receipt: Receipt,
+    tag: u8,
+    id: NonZeroU64,
+    value: bool,
 ) -> io::Result<()> {
-    let mut bytes = [0; 17];
-    bytes[..8].copy_from_slice(RECEIPT);
-    bytes[8..16].copy_from_slice(&receipt.counter.get().to_be_bytes());
-    bytes[16] = u8::from(receipt.applied);
-    writer.write_all(&bytes).await
+    writer.write_u8(tag).await?;
+    writer.write_u64(id.get()).await?;
+    writer.write_u8(u8::from(value)).await
 }
 
-pub async fn read_record(
-    reader: &mut (impl AsyncRead + Unpin),
-    on_update: impl FnOnce(Revision),
-) -> io::Result<Record> {
-    let mut header = [0; HEADER.len()];
-    reader.read_exact(&mut header).await?;
-    if &header == RECEIPT {
-        let counter = NonZeroU64::new(reader.read_u64().await?)
-            .ok_or_else(|| invalid("clipboard receipt must identify a revision"))?;
-        let applied = match reader.read_u8().await? {
-            0 => false,
-            1 => true,
-            _ => return Err(invalid("invalid clipboard receipt")),
-        };
-        return Ok(Record::Receipt(Receipt { counter, applied }));
+pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Control> {
+    let tag = reader.read_u8().await?;
+    let id = NonZeroU64::new(reader.read_u64().await?).ok_or_else(invalid)?;
+    match tag {
+        1 => {
+            let mut origin = [0; 16];
+            reader.read_exact(&mut origin).await?;
+            let layout = match reader.read_u8().await? {
+                1 => Layout::Text {
+                    plain: reader.read_u32().await?,
+                    html: reader.read_u32().await?,
+                },
+                2 => Layout::Png(reader.read_u32().await?),
+                3 => {
+                    let count = reader.read_u8().await? as usize;
+                    if !(1..=MAX_FILES).contains(&count) {
+                        return Err(invalid());
+                    }
+                    let mut files = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let size = reader.read_u64().await?;
+                        let len = reader.read_u8().await? as usize;
+                        if !(1..=MAX_NAME_BYTES).contains(&len) {
+                            return Err(invalid());
+                        }
+                        let mut name = vec![0; len];
+                        reader.read_exact(&mut name).await?;
+                        let name = String::from_utf8(name).map_err(|_| invalid())?;
+                        files.push(FileOffer { name, size });
+                    }
+                    Layout::Files(files)
+                }
+                _ => return Err(invalid()),
+            };
+            layout.total()?;
+            Ok(Control::Offer(Offer {
+                revision: Revision {
+                    counter: id,
+                    origin: DeviceId(origin),
+                },
+                layout,
+            }))
+        }
+        2 => Ok(Control::Decision {
+            id,
+            accept: read_flag(reader).await?,
+        }),
+        3 => Ok(Control::Receipt {
+            id,
+            applied: read_flag(reader).await?,
+        }),
+        4 => Ok(Control::Withdraw(id)),
+        _ => Err(invalid()),
     }
-    if &header != HEADER {
-        return Err(invalid("unsupported clipboard frame"));
+}
+
+async fn read_flag(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<bool> {
+    match reader.read_u8().await? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(invalid()),
     }
-    let mut origin = [0; 16];
-    reader.read_exact(&mut origin).await?;
-    let counter = NonZeroU64::new(reader.read_u64().await?)
-        .ok_or_else(|| invalid("clipboard revision must be nonzero"))?;
-    let plain_len = reader.read_u32().await? as usize;
-    let html_len = reader.read_u32().await? as usize;
-    let png_len = reader.read_u32().await? as usize;
-    if plain_len > MAX_TEXT_BYTES
-        || html_len > MAX_HTML_BYTES
-        || png_len > MAX_PNG_BYTES
-        || (png_len != 0 && (plain_len != 0 || html_len != 0))
-    {
-        return Err(invalid("invalid clipboard representation lengths"));
-    }
-
-    let revision = Revision {
-        counter,
-        origin: DeviceId(origin),
-    };
-    on_update(revision);
-    let content = if png_len != 0 {
-        Content::Png(read_bytes(reader, png_len).await?)
-    } else {
-        let plain = read_utf8(reader, plain_len).await?;
-        let html = if html_len != 0 {
-            Some(read_utf8(reader, html_len).await?)
-        } else {
-            None
-        };
-        Content::Text { plain, html }
-    };
-    Update::new(revision, content).map(Record::Update)
 }
 
-async fn read_bytes(reader: &mut (impl AsyncRead + Unpin), len: usize) -> io::Result<Vec<u8>> {
-    let mut bytes = vec![0; len];
-    reader.read_exact(&mut bytes).await?;
-    Ok(bytes)
-}
-
-async fn read_utf8(reader: &mut (impl AsyncRead + Unpin), len: usize) -> io::Result<String> {
-    String::from_utf8(read_bytes(reader, len).await?)
-        .map_err(|_| invalid("clipboard data is not UTF-8"))
-}
-
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
+fn invalid() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid clipboard transfer metadata",
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::duplex;
-
-    fn revision() -> Revision {
-        Revision {
-            counter: NonZeroU64::new(7).unwrap(),
-            origin: DeviceId([42; 16]),
-        }
-    }
-
-    async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Update> {
-        match read_record(reader, |_| {}).await? {
-            Record::Update(update) => Ok(update),
-            Record::Receipt(_) => Err(invalid("unexpected clipboard receipt")),
-        }
-    }
 
     #[tokio::test]
-    async fn receipt_round_trips_without_announcing_an_update() {
-        let receipt = Receipt {
-            counter: revision().counter,
-            applied: true,
-        };
-        let mut bytes = Vec::new();
-        write_receipt(&mut bytes, receipt).await.unwrap();
-        let record = read_record(&mut bytes.as_slice(), |_| {
-            panic!("receipt is not an update")
-        })
-        .await
-        .unwrap();
-        assert!(matches!(record, Record::Receipt(actual) if actual == receipt));
-    }
-
-    #[tokio::test]
-    async fn announces_progress_after_valid_metadata_before_reading_the_payload() {
-        let update = Update::new(
-            revision(),
-            Content::Text {
-                plain: "data".into(),
-                html: None,
+    async fn offer_contains_only_metadata_and_round_trips() {
+        let offer = Control::Offer(Offer {
+            revision: Revision {
+                counter: NonZeroU64::MIN,
+                origin: DeviceId([2; 16]),
             },
-        )
-        .unwrap();
-        let mut frame = Vec::new();
-        write(&mut frame, &update).await.unwrap();
-        frame.truncate(frame.len() - 4);
-        let mut announced = None;
-        let error = read_record(&mut frame.as_slice(), |revision| announced = Some(revision))
-            .await
-            .err()
-            .expect("expected a truncated payload");
-        assert_eq!(announced, Some(update.revision()));
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+            layout: Layout::Files(vec![FileOffer {
+                name: "写真.png".into(),
+                size: MAX_BYTES,
+            }]),
+        });
+        let mut wire = Vec::new();
+        write(&mut wire, &offer).await.unwrap();
+        assert!(wire.len() < 80);
+        assert_eq!(read(&mut wire.as_slice()).await.unwrap(), offer);
     }
 
-    async fn round_trip(content: Content) -> Update {
-        let expected = Update::new(revision(), content).unwrap();
-        let (mut sender, mut receiver) = duplex(5);
-        let (sent, received) = tokio::join!(write(&mut sender, &expected), read(&mut receiver));
-        sent.unwrap();
-        let received = received.unwrap();
-        assert_eq!(received.revision(), revision());
-        received
-    }
-
-    #[tokio::test]
-    async fn round_trips_unicode_and_optional_html_across_partial_io() {
-        let text = "日本語\nПривет\n🧪";
-        for rich in [None, Some("<strong>日本語</strong>")] {
-            let received = round_trip(Content::Text {
-                plain: text.into(),
-                html: rich.map(str::to_owned),
-            })
-            .await;
-            assert!(matches!(received.content(), Content::Text { plain, html }
-                if plain == text && html.as_deref() == rich));
+    #[test]
+    fn thresholds_apply_to_the_total_copy_and_reject_unsafe_names() {
+        for size in [AUTO_BYTES, AUTO_BYTES + 1, MAX_BYTES, MAX_BYTES + 1] {
+            let layout = Layout::Text {
+                plain: (size - 1) as u32,
+                html: 1,
+            };
+            assert_eq!(
+                layout.requires_approval().ok(),
+                (size <= MAX_BYTES).then_some(size > AUTO_BYTES)
+            );
         }
-    }
-
-    #[tokio::test]
-    async fn round_trips_png_bytes_as_a_separate_representation() {
-        let mut bytes = PNG_SIGNATURE.to_vec();
-        bytes.extend([0, 1, 2, 3]);
-        let received = round_trip(Content::Png(bytes.clone())).await;
-        assert!(matches!(received.content(), Content::Png(data) if data == &bytes));
-    }
-
-    #[tokio::test]
-    async fn rejects_invalid_metadata_before_reading_payload() {
-        let mut frame = Vec::new();
-        let empty = Update::new(
-            revision(),
-            Content::Text {
-                plain: String::new(),
-                html: None,
-            },
-        )
-        .unwrap();
-        write(&mut frame, &empty).await.unwrap();
-        for (offset, value) in [
-            (0, b'X'),
-            (31, 0),
-            (32, u8::MAX),
-            (36, u8::MAX),
-            (40, u8::MAX),
+        for name in [
+            "..", "a/../b", "C:secret", "CON.txt", "name.", "name ", "x\\y",
         ] {
-            let mut bytes = frame.clone();
-            bytes[offset] = value;
-            let error = read(&mut bytes.as_slice()).await.err().unwrap();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(!valid_name(name));
         }
-        let mut mixed = frame.clone();
-        mixed[35] = 1;
-        mixed[43] = 1;
-        assert_eq!(
-            read(&mut mixed.as_slice()).await.err().unwrap().kind(),
-            io::ErrorKind::InvalidData
-        );
-
-        for length_byte in [35, 39, 43] {
-            for value in [0, 255] {
-                let mut bytes = frame.clone();
-                bytes[length_byte] = 1;
-                bytes.push(value);
-                let error = read(&mut bytes.as_slice()).await.err().unwrap();
-                assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-            }
-        }
+        assert!(valid_name("résumé.final.pdf"));
     }
 }

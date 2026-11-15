@@ -11,13 +11,14 @@ mod macos;
 mod windows;
 
 #[cfg(target_os = "macos")]
-pub use macos::Clipboard;
+pub use macos::{Clipboard, open_source, staging_directory};
 #[cfg(target_os = "windows")]
-pub use windows::Clipboard;
+pub use windows::{Clipboard, open_source, staging_directory};
 
 pub struct Snapshot {
     pub sequence: u64,
     pub content: Option<Content>,
+    pub imported: bool,
 }
 
 pub enum WriteOutcome {

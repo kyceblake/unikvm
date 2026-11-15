@@ -1,6 +1,7 @@
 #![allow(unsafe_code)]
 
-use std::io;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use image::ImageFormat;
 use objc2::rc::autoreleasepool;
@@ -9,12 +10,13 @@ use objc2_app_kit::{
     NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypeHTML,
     NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF, NSPasteboardWriting,
 };
-use objc2_foundation::{NSArray, NSData, NSString};
-use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_TEXT_BYTES};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
+use unikvm_core::clipboard::{Content, MAX_FILES, MAX_HTML_BYTES, MAX_TEXT_BYTES};
 
 use super::{Snapshot, WriteOutcome, imaging};
 
 const TRANSIENT: &str = "org.nspasteboard.TransientType";
+const IMPORTED: &str = "org.unikvm.received-clipboard";
 const JPEG: &str = "public.jpeg";
 const MAX_PASTEBOARD_ITEMS: usize = 16;
 const SKIP_TYPES: &[&str] = &[
@@ -63,11 +65,15 @@ impl Clipboard {
                 )
             };
             let types = self.board.types();
-            let eligible = types.as_ref().is_some_and(|types| {
-                !SKIP_TYPES
-                    .iter()
-                    .any(|name| types.containsObject(&NSString::from_str(name)))
-            });
+            let imported = types
+                .as_ref()
+                .is_some_and(|types| types.containsObject(&NSString::from_str(IMPORTED)));
+            let eligible = !imported
+                && types.as_ref().is_some_and(|types| {
+                    !SKIP_TYPES
+                        .iter()
+                        .any(|name| types.containsObject(&NSString::from_str(name)))
+                });
             let content = eligible.then(|| {
                 let items = self.board.pasteboardItems()?;
                 let jpeg = NSString::from_str(JPEG);
@@ -92,33 +98,44 @@ impl Clipboard {
                         return Some(Content::Png(png));
                     }
                 }
-                // A file reference can accompany an explicit image item. It
-                // does not authorize opening that file or forwarding its path.
                 let types = types.as_ref()?;
-                if types.containsObject(file_type)
-                    || types.containsObject(&NSString::from_str(LEGACY_FILE_LIST))
-                {
+                if types.containsObject(file_type) {
+                    return file_paths(&items, file_type).map(Content::Files);
+                }
+                if types.containsObject(&NSString::from_str(LEGACY_FILE_LIST)) {
                     return None;
                 }
                 if items.len() != 1 {
                     return None;
                 }
                 let item = items.firstObject()?;
-                let plain = String::from_utf8(read_item(&item, text_type, MAX_TEXT_BYTES)?).ok()?;
-                let html = read_item(&item, html_type, MAX_HTML_BYTES)
-                    .and_then(|data| String::from_utf8(data).ok());
+                let plain = item.dataForType(text_type)?;
+                let html = item.dataForType(html_type);
+                if plain.len() > MAX_TEXT_BYTES
+                    || html
+                        .as_ref()
+                        .is_some_and(|html| html.len() > MAX_HTML_BYTES)
+                {
+                    return Some(Content::TooLarge);
+                }
+                let plain = String::from_utf8(plain.to_vec()).ok()?;
+                let html = html.and_then(|data| String::from_utf8(data.to_vec()).ok());
                 Some(Content::Text { plain, html })
             });
             // The type list and the contents must belong to the same item generation.
             Ok((self.sequence()? == sequence).then_some(Snapshot {
                 sequence,
                 content: content.flatten(),
+                imported,
             }))
         })
     }
 
     pub fn write(&self, expected: u64, content: &Content) -> io::Result<WriteOutcome> {
         autoreleasepool(|_| {
+            if let Content::Files(paths) = content {
+                return self.write_files(expected, paths);
+            }
             let item = NSPasteboardItem::new();
             // SAFETY: AppKit initializes this immutable exported type name.
             let (text_type, html_type, png_type, tiff_type) = unsafe {
@@ -149,10 +166,9 @@ impl Clipboard {
                     }
                     set(png_type, &png)
                 }
+                Content::Files(_) | Content::TooLarge => return Ok(WriteOutcome::Unsupported),
             };
-            if !prepared
-                || !item.setData_forType(&NSData::with_bytes(&[]), &NSString::from_str(TRANSIENT))
-            {
+            if !prepared || !mark_imported(&item) {
                 return Err(io::Error::other("could not prepare Mac pasteboard data"));
             }
             let item = ProtocolObject::<dyn NSPasteboardWriting>::from_retained(item);
@@ -167,6 +183,117 @@ impl Clipboard {
             Ok(WriteOutcome::Applied(sequence))
         })
     }
+
+    fn write_files(&self, expected: u64, paths: &[PathBuf]) -> io::Result<WriteOutcome> {
+        let mut items = Vec::with_capacity(paths.len());
+        // SAFETY: AppKit initializes this immutable type name.
+        let kind = unsafe { NSPasteboardTypeFileURL };
+        for path in paths {
+            let path = path
+                .to_str()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(path), false);
+            let url = url
+                .absoluteString()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            let item = NSPasteboardItem::new();
+            if !item.setString_forType(&url, kind) || !mark_imported(&item) {
+                return Err(io::Error::other("could not prepare Mac file reference"));
+            }
+            items.push(ProtocolObject::<dyn NSPasteboardWriting>::from_retained(
+                item,
+            ));
+        }
+        if self.sequence()? != expected {
+            return Ok(WriteOutcome::Changed);
+        }
+        self.board.clearContents();
+        if !self
+            .board
+            .writeObjects(&NSArray::from_retained_slice(&items))
+        {
+            return Err(io::Error::other("could not write Mac file references"));
+        }
+        Ok(WriteOutcome::Applied(self.sequence()?))
+    }
+
+    pub fn imported_files(&self) -> io::Result<Option<Vec<PathBuf>>> {
+        autoreleasepool(|_| {
+            let imported = self
+                .board
+                .types()
+                .is_some_and(|types| types.containsObject(&NSString::from_str(IMPORTED)));
+            // SAFETY: AppKit initializes the immutable pasteboard type.
+            let kind = unsafe { NSPasteboardTypeFileURL };
+            Ok(if imported {
+                self.board
+                    .pasteboardItems()
+                    .and_then(|items| file_paths(&items, kind))
+            } else {
+                None
+            })
+        })
+    }
+}
+
+pub fn staging_directory() -> io::Result<PathBuf> {
+    crate::local::Endpoint::for_current_user()?
+        .clipboard_directory()?
+        .canonicalize()
+}
+
+fn file_paths(items: &NSArray<NSPasteboardItem>, kind: &NSString) -> Option<Vec<PathBuf>> {
+    if !(1..=MAX_FILES).contains(&items.len()) {
+        return None;
+    }
+    let paths = (0..items.len())
+        .filter_map(|index| {
+            let item = items.objectAtIndex(index);
+            item.types().containsObject(kind).then_some(item)
+        })
+        .map(|item| {
+            let text = item.stringForType(kind)?;
+            if text.len() > 32_768 {
+                return None;
+            }
+            let url = NSURL::URLWithString(&text)?;
+            if !url.isFileURL()
+                || url.host().is_some_and(|host| {
+                    let host = host.to_string();
+                    !host.is_empty() && host != "localhost"
+                })
+            {
+                return None;
+            }
+            let path = PathBuf::from(url.path()?.to_string());
+            path.is_absolute().then_some(path)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!paths.is_empty()).then_some(paths)
+}
+
+fn mark_imported(item: &NSPasteboardItem) -> bool {
+    let empty = NSData::with_bytes(&[]);
+    item.setData_forType(&empty, &NSString::from_str(TRANSIENT))
+        && item.setData_forType(&empty, &NSString::from_str(IMPORTED))
+}
+
+pub fn open_source(path: &Path) -> io::Result<fs::File> {
+    use rustix::fs::{Mode, OFlags, open};
+
+    if !path.is_absolute() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let file: fs::File = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )?
+    .into();
+    if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
 }
 
 fn read_item(item: &NSPasteboardItem, kind: &NSString, limit: usize) -> Option<Vec<u8>> {
@@ -275,7 +402,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires a logged-in macOS desktop"]
-    fn native_file_reference_without_image_data_is_ignored() {
+    fn native_file_reference_round_trips_without_echo() {
         autoreleasepool(|_| {
             let clipboard = Clipboard {
                 board: NSPasteboard::pasteboardWithUniqueName(),
@@ -297,7 +424,17 @@ mod tests {
             ]);
             clipboard.board.clearContents();
             assert!(clipboard.board.writeObjects(&items));
-            assert!(clipboard.read(initial).unwrap().unwrap().content.is_none());
+            let snapshot = clipboard.read(initial).unwrap().unwrap();
+            let content = snapshot.content.unwrap();
+            assert!(
+                matches!(&content, Content::Files(paths) if paths == &[PathBuf::from("/tmp/unikvm-unused-image.jpg")])
+            );
+            assert!(matches!(
+                clipboard.write(snapshot.sequence, &content).unwrap(),
+                WriteOutcome::Applied(_)
+            ));
+            assert!(clipboard.read(snapshot.sequence).unwrap().unwrap().imported);
+            assert!(clipboard.board.stringForType(file_type).is_some());
             clipboard.board.clearContents();
         });
     }

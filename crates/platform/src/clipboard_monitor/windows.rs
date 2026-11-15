@@ -10,17 +10,20 @@ use windows_sys::Win32::Graphics::Gdi::{
     PAINTSTRUCT, SetBkColor, SetTextColor,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::SystemServices::SS_NOPREFIX;
 use windows_sys::Win32::UI::HiDpi::{
     AdjustWindowRectExForDpi, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, GetDpiForSystem, GetDpiForWindow,
     SetProcessDpiAwarenessContext,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetMessageW, GetWindowLongPtrW, IDC_ARROW, IsWindow, LoadCursorW, MSG, PostQuitMessage,
-    RegisterClassW, SPI_GETCLIENTAREAANIMATION, SW_SHOWNORMAL, SendMessageW, SetTimer,
-    SetWindowLongPtrW, SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    BS_DEFPUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, GWLP_USERDATA, GetMessageW, GetWindowLongPtrW, IDC_ARROW, IDCANCEL, IDOK,
+    IsDialogMessageW, IsWindow, LoadCursorW, MSG, PostQuitMessage, RegisterClassW,
+    SPI_GETCLIENTAREAANIMATION, SW_SHOWNORMAL, SendMessageW, SetTimer, SetWindowLongPtrW,
+    SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_COMMAND,
     WM_CTLCOLORSTATIC, WM_DESTROY, WM_PAINT, WM_SETFONT, WM_TIMER, WNDCLASSW, WS_CAPTION, WS_CHILD,
-    WS_MINIMIZEBOX, WS_SYSMENU, WS_VISIBLE,
+    WS_EX_TOPMOST, WS_MINIMIZEBOX, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 use windows_sys::core::w;
 
@@ -32,6 +35,7 @@ const MARGIN: i32 = 20;
 const ROW_TOPS: [i32; 2] = [56, 124];
 const TIMER: usize = 1;
 const FRAMES: isize = 32;
+const RECEIVE_BUTTON: i32 = 100;
 
 pub(super) fn show(read: impl Fn() -> View) -> io::Result<()> {
     // SAFETY: The window, static controls, timer and fonts all belong to this UI thread.
@@ -109,7 +113,7 @@ pub(super) fn show(read: impl Fn() -> View) -> io::Result<()> {
         let mut rows = [null_mut(); 2];
         for (index, y) in ROW_TOPS.into_iter().enumerate() {
             label(HEADINGS[index], y, &bold)?;
-            rows[index] = label(previous.rows[index].text, y + 24, &regular)?;
+            rows[index] = label(&previous.rows[index].message(), y + 24, &regular)?;
         }
         let mut animate = 1i32;
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&raw mut animate).cast(), 0);
@@ -133,8 +137,8 @@ pub(super) fn show(read: impl Fn() -> View) -> io::Result<()> {
                     SetWindowTextW(connection, wide(next.connection).as_ptr());
                 }
                 for (index, handle) in rows.into_iter().enumerate() {
-                    if previous.rows[index].text != next.rows[index].text {
-                        SetWindowTextW(handle, wide(next.rows[index].text).as_ptr());
+                    if previous.rows[index] != next.rows[index] {
+                        SetWindowTextW(handle, wide(&next.rows[index].message()).as_ptr());
                     }
                 }
                 if animate != 0 {
@@ -147,6 +151,135 @@ pub(super) fn show(read: impl Fn() -> View) -> io::Result<()> {
                 DispatchMessageW(&message);
             }
         }
+    }
+}
+
+pub(super) fn approve(item: &str, size: &str) -> io::Result<bool> {
+    // SAFETY: All handles and controls are owned by this UI thread. Pointer
+    // arguments are initialized and live through their synchronous calls.
+    unsafe {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+        let dpi = GetDpiForSystem();
+        let px = |dip| scale(dip, dpi);
+        let instance = GetModuleHandleW(null());
+        let class = w!("UniKVMClipboardApproval");
+        if RegisterClassW(&WNDCLASSW {
+            lpfnWndProc: Some(approval_proc),
+            hInstance: instance,
+            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+            hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+            lpszClassName: class,
+            ..WNDCLASSW::default()
+        }) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let style = WS_CAPTION | WS_SYSMENU;
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: px(WIDTH),
+            bottom: px(158),
+        };
+        if AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_TOPMOST, dpi) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let font = Font::new(px(15), 400)?;
+        let window = Window(CreateWindowExW(
+            WS_EX_TOPMOST,
+            class,
+            w!("UniKVM Clipboard"),
+            style,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            bounds.right - bounds.left,
+            bounds.bottom - bounds.top,
+            null_mut(),
+            null_mut(),
+            instance,
+            null(),
+        ));
+        if window.0.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let text =
+            format!("Receive a clipboard copy from your paired computer?\r\n\r\n{item} ({size})");
+        let label = CreateWindowExW(
+            0,
+            w!("STATIC"),
+            wide(&text).as_ptr(),
+            WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+            px(MARGIN),
+            px(18),
+            px(WIDTH - 2 * MARGIN),
+            px(91),
+            window.0,
+            null_mut(),
+            instance,
+            null(),
+        );
+        if label.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        SendMessageW(label, WM_SETFONT, font.0 as usize, 0);
+        let mut decline = null_mut();
+        for (text, x, id, flags) in [
+            (w!("Decline"), 204, IDOK, BS_DEFPUSHBUTTON as u32),
+            (w!("Receive"), 304, RECEIVE_BUTTON, 0),
+        ] {
+            let button = CreateWindowExW(
+                0,
+                w!("BUTTON"),
+                text,
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | flags,
+                px(x),
+                px(113),
+                px(96),
+                px(28),
+                window.0,
+                id as usize as _,
+                instance,
+                null(),
+            );
+            if button.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+            if id == IDOK {
+                decline = button;
+            }
+            SendMessageW(button, WM_SETFONT, font.0 as usize, 0);
+        }
+        ShowWindow(window.0, SW_SHOWNORMAL);
+        SetFocus(decline);
+        let mut message = MSG::default();
+        loop {
+            match GetMessageW(&mut message, null_mut(), 0, 0) {
+                -1 => return Err(io::Error::last_os_error()),
+                0 => return Ok(message.wParam == RECEIVE_BUTTON as usize),
+                _ if IsDialogMessageW(window.0, &message) != 0 => {}
+                _ => {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+        }
+    }
+}
+
+unsafe extern "system" fn approval_proc(
+    window: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: Windows supplies a live window and message-specific parameters.
+    unsafe {
+        let id = (wparam & 0xffff) as i32;
+        if message == WM_COMMAND && matches!(id, IDOK | IDCANCEL | RECEIVE_BUTTON) {
+            PostQuitMessage(id);
+            return 0;
+        }
+        window_proc(window, message, wparam, lparam)
     }
 }
 

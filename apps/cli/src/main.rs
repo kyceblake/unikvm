@@ -25,6 +25,14 @@ fn run() -> Result<()> {
     match command.as_deref().and_then(|arg| arg.to_str()) {
         Some("status") if args.next().is_none() => {}
         Some("clipboard") if args.next().is_none() => return clipboard::open(),
+        Some("clipboard-approval") => {
+            let id = args
+                .next()
+                .and_then(|value| value.to_str()?.parse::<u64>().ok())
+                .context("expected a clipboard approval identifier")?;
+            anyhow::ensure!(args.next().is_none(), USAGE);
+            return clipboard::prompt(id);
+        }
         Some("identity") => return identity_command(args),
         Some("peer") => return verify_command(args),
         Some("-h" | "--help") if args.next().is_none() => {

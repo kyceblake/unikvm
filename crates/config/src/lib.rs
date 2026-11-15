@@ -36,6 +36,8 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct ClipboardConfig {
     pub peer_fingerprint: String,
+    #[serde(default)]
+    pub files: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]

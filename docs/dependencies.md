@@ -65,7 +65,10 @@ The native monitor uses the existing `windows-sys` 0.61.2 bindings for a Win32 w
 | [clipboard-rs](https://crates.io/crates/clipboard-rs) | 0.3.5 | 1.67 | MIT | 2026-06-30 | Evaluate text and change notifications per desktop, including Wayland capability and consent. |
 | [display-info](https://crates.io/crates/display-info) | 0.5.10 | Unspecified | Apache-2.0 | 2026-10-22 | Evaluate IDs, logical geometry, DPI and rotation per platform. |
 | [keyring](https://crates.io/crates/keyring) | 4.2.0 | 1.88 | MIT OR Apache-2.0 | 2026-08-29 | Evaluate native credential backends and explicit store selection and availability. |
-| [blake3](https://crates.io/crates/blake3) | 1.8.7 | Unspecified | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | 2026-08-20 | Streaming file integrity once transfer is in scope. |
+
+## Adopted for file transfers
+
+Clipboard v5 uses [BLAKE3 1.8.7](https://crates.io/crates/blake3/1.8.7) with the `pure` feature to verify the transferred byte stream incrementally. The release declares no MSRV and is licensed CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception. Quinn, Tokio, and the native platform bindings retain their locked versions. [BLAKE3 streaming API](https://docs.rs/blake3/1.8.7/blake3/struct.Hasher.html)
 
 These candidates stay outside the dependency graph until a milestone exercises them. Their release MSRVs are compatible with the pinned compiler where declared. Platform prerequisites and future transitive resolution still need validation. [Quinn endpoint](https://docs.rs/quinn/latest/quinn/struct.Endpoint.html), [Rustls](https://docs.rs/rustls/latest/rustls/), [mDNS service daemon](https://docs.rs/mdns-sd/latest/mdns_sd/struct.ServiceDaemon.html), [Ratatui terminal lifecycle](https://docs.rs/ratatui/latest/ratatui/fn.run.html)
 

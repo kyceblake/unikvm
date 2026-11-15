@@ -351,8 +351,10 @@ async fn either_authenticated_endpoint_can_open_an_input_stream() {
 #[tokio::test]
 async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authenticated_link() {
     use std::num::NonZeroU64;
-    use unikvm_core::clipboard::{Content, MAX_HTML_BYTES, MAX_TEXT_BYTES, PNG_SIGNATURE};
-    use unikvm_protocol::clipboard::{self, READY, Receipt, Record, Revision, Update};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use unikvm_core::clipboard::Content;
+    use unikvm_protocol::clipboard::{self, Control, DATA, Offer, READY, Revision};
+    use unikvm_transfer::{Prepared, receive};
 
     let [a_addr, b_addr] = addresses();
     let a = Identity::generate().unwrap();
@@ -373,67 +375,96 @@ async fn clipboard_payload_larger_than_the_receive_window_can_cross_an_authentic
     let b_link = b_link.borrow_and_update().clone().unwrap();
 
     let exchange = |connection: quinn::Connection, origin, expected| async move {
-        let mut send = connection.open_uni().await.unwrap();
-        send.write_all(READY).await.unwrap();
-        let mut recv = connection.accept_uni().await.unwrap();
+        let mut control = connection.open_uni().await.unwrap();
+        control.write_all(READY).await.unwrap();
+        let mut remote = connection.accept_uni().await.unwrap();
         let mut ready = [0; READY.len()];
-        recv.read_exact(&mut ready).await.unwrap();
+        remote.read_exact(&mut ready).await.unwrap();
         assert_eq!(&ready, READY);
-        let text = "日本".repeat(MAX_TEXT_BYTES / 6);
+        let text = "日本".repeat(950_000);
+        let html = "<b>あ</b>";
+        let prepared = Prepared::new(
+            Content::Text {
+                plain: text.clone(),
+                html: Some(html.into()),
+            },
+            |_| unreachable!(),
+        )
+        .unwrap();
         let revision = Revision {
             counter: NonZeroU64::MIN,
             origin,
         };
-        let html = format!("<b>{}</b>", "あ".repeat((MAX_HTML_BYTES - 7) / 3));
-        let update = Update::new(
+        let offer = Control::Offer(Offer {
             revision,
-            Content::Text {
-                plain: text,
-                html: Some(html),
+            layout: prepared.layout.clone(),
+        });
+        clipboard::write(&mut control, &offer).await.unwrap();
+        let Control::Offer(received) = clipboard::read(&mut remote).await.unwrap() else {
+            panic!("expected an offer");
+        };
+        assert_eq!(received.revision.origin, expected);
+        assert!(received.layout.requires_approval().unwrap());
+        assert!(
+            timeout(Duration::from_millis(40), connection.accept_uni())
+                .await
+                .is_err()
+        );
+        let decision = Control::Decision {
+            id: received.revision.counter,
+            accept: true,
+        };
+        clipboard::write(&mut control, &decision).await.unwrap();
+        assert_eq!(clipboard::read(&mut remote).await.unwrap(), decision);
+        let ((), data, ()) = tokio::join!(
+            async {
+                let mut stream = connection.open_uni().await.unwrap();
+                stream.write_all(DATA).await.unwrap();
+                stream.write_u64(revision.counter.get()).await.unwrap();
+                unikvm_transfer::send(&mut stream, prepared, |_| {})
+                    .await
+                    .unwrap();
+                stream.finish().unwrap();
             },
-        )
-        .unwrap();
-        let (sent, received) = tokio::join!(
-            clipboard::write(&mut send, &update),
-            clipboard::read_record(&mut recv, |revision| assert_eq!(revision.origin, expected)),
+            async {
+                let mut stream = connection.accept_uni().await.unwrap();
+                let mut header = [0; DATA.len()];
+                stream.read_exact(&mut header).await.unwrap();
+                assert_eq!(&header, DATA);
+                assert_eq!(
+                    stream.read_u64().await.unwrap(),
+                    received.revision.counter.get()
+                );
+                receive(&mut stream, &received.layout, None, |_| {})
+                    .await
+                    .unwrap()
+            },
+            async {
+                timeout(Duration::from_secs(2), async {
+                    let ((), ()) = tokio::join!(
+                        async {
+                            let (mut stream, _) = connection.open_bi().await.unwrap();
+                            stream.write_all(b"input").await.unwrap();
+                            stream.finish().unwrap();
+                        },
+                        async {
+                            let (_, mut stream) = connection.accept_bi().await.unwrap();
+                            assert_eq!(stream.read_to_end(5).await.unwrap(), b"input");
+                        },
+                    );
+                })
+                .await
+                .unwrap();
+            },
         );
-        sent.unwrap();
-        let Record::Update(received) = received.unwrap() else {
-            panic!("expected a clipboard update");
-        };
-        assert_eq!(received.revision().origin, expected);
-        assert!(matches!((update.content(), received.content()),
-            (Content::Text { plain, html }, Content::Text { plain: received_plain, html: received_html })
-            if plain == received_plain && html == received_html));
-        // The transport treats PNG contents as opaque. Native adapters decode them.
-        let mut png = PNG_SIGNATURE.to_vec();
-        png.resize(512 * 1024, 21);
-        let revision = Revision {
-            counter: NonZeroU64::new(2).unwrap(),
-            origin,
-        };
-        let update = Update::new(revision, Content::Png(png)).unwrap();
-        let (sent, received) = tokio::join!(
-            clipboard::write(&mut send, &update),
-            clipboard::read_record(&mut recv, |revision| assert_eq!(revision.origin, expected)),
-        );
-        sent.unwrap();
-        let Record::Update(received) = received.unwrap() else {
-            panic!("expected a clipboard update");
-        };
-        assert!(matches!((update.content(), received.content()),
-            (Content::Png(png), Content::Png(received_png)) if png == received_png));
-        let receipt = Receipt {
-            counter: received.revision().counter,
+        assert!(matches!(data.content, Content::Text { plain, html: rich }
+            if plain == text && rich.as_deref() == Some(html)));
+        let receipt = Control::Receipt {
+            id: received.revision.counter,
             applied: true,
         };
-        let (sent, reply) = tokio::join!(
-            clipboard::write_receipt(&mut send, receipt),
-            clipboard::read_record(&mut recv, |_| panic!("expected a receipt")),
-        );
-        sent.unwrap();
-        assert!(matches!(reply.unwrap(), Record::Receipt(reply)
-            if reply.counter == update.revision().counter && reply.applied));
+        clipboard::write(&mut control, &receipt).await.unwrap();
+        assert_eq!(clipboard::read(&mut remote).await.unwrap(), receipt);
     };
     let a_id = a.fingerprint().device_id();
     let b_id = b.fingerprint().device_id();

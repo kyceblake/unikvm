@@ -105,6 +105,19 @@ impl Endpoint {
     fn socket_path(&self) -> PathBuf {
         self.directory.join("agent.sock")
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn clipboard_directory(&self) -> io::Result<PathBuf> {
+        check_directory(&self.directory)?;
+        let directory = self.directory.join("clipboard");
+        match DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        check_directory(&directory)?;
+        Ok(directory)
+    }
 }
 
 impl Listener {

@@ -6,6 +6,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const REQUEST: &[u8] = b"UNIKVM/1 STATUS\n";
 const CLIPBOARD: &[u8] = b"UNIKVM/1 CLIPBD\n";
+const OFFER: &[u8] = b"UNIKVM/1 CLPOFR\n";
+const DECIDE: &[u8] = b"UNIKVM/1 CLPDEC\n";
 const ACK: u8 = 0x06;
 const HEADER: &[u8] = b"UNIKVM/1 OK\n";
 
@@ -24,6 +26,9 @@ pub enum ClipboardPhase {
     Ready,
     Failed,
     Skipped,
+    Waiting,
+    TooLarge,
+    Declined,
 }
 
 impl ClipboardPhase {
@@ -34,6 +39,9 @@ impl ClipboardPhase {
             2 => Ok(Self::Ready),
             3 => Ok(Self::Failed),
             4 => Ok(Self::Skipped),
+            5 => Ok(Self::Waiting),
+            6 => Ok(Self::TooLarge),
+            7 => Ok(Self::Declined),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid clipboard status",
@@ -47,6 +55,27 @@ pub struct ClipboardStatus {
     pub connected: bool,
     pub outgoing: ClipboardPhase,
     pub incoming: ClipboardPhase,
+    pub sent: Progress,
+    pub received: Progress,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub bytes: u64,
+    pub total: u64,
+}
+
+#[derive(Clone)]
+pub struct Approval {
+    pub id: u64,
+    pub bytes: u64,
+    pub label: String,
+}
+
+#[derive(Clone, Copy)]
+pub struct ApprovalDecision {
+    pub id: u64,
+    pub accept: bool,
 }
 
 pub async fn query(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> io::Result<Status> {
@@ -75,6 +104,8 @@ pub async fn query_clipboard(
         connected: state[0] == 1,
         outgoing: ClipboardPhase::from_byte(state[1])?,
         incoming: ClipboardPhase::from_byte(state[2])?,
+        sent: read_progress(stream).await?,
+        received: read_progress(stream).await?,
     };
     if state[0] > 1 {
         return Err(io::Error::new(
@@ -86,6 +117,65 @@ pub async fn query_clipboard(
     Ok(status)
 }
 
+async fn read_progress(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Progress> {
+    let bytes = stream.read_u64().await?;
+    let total = stream.read_u64().await?;
+    if total > unikvm_core::clipboard::MAX_BYTES || bytes > total {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid clipboard progress",
+        ));
+    }
+    Ok(Progress { bytes, total })
+}
+
+pub async fn approval(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    id: u64,
+) -> io::Result<Option<Approval>> {
+    stream.write_all(OFFER).await?;
+    stream.write_u64(id).await?;
+    expect(stream, HEADER).await?;
+    let offer = if read_flag(stream).await? {
+        let bytes = stream.read_u64().await?;
+        let len = stream.read_u8().await? as usize;
+        let mut label = vec![0; len];
+        stream.read_exact(&mut label).await?;
+        let label = String::from_utf8(label).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid clipboard offer label")
+        })?;
+        Some(Approval { id, bytes, label })
+    } else {
+        None
+    };
+    stream.write_u8(ACK).await?;
+    Ok(offer)
+}
+
+pub async fn decide(
+    stream: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    decision: ApprovalDecision,
+) -> io::Result<bool> {
+    stream.write_all(DECIDE).await?;
+    stream.write_u64(decision.id).await?;
+    stream.write_u8(u8::from(decision.accept)).await?;
+    expect(stream, HEADER).await?;
+    let accepted = read_flag(stream).await?;
+    stream.write_u8(ACK).await?;
+    Ok(accepted)
+}
+
+async fn read_flag(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<bool> {
+    match stream.read_u8().await? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid clipboard flag",
+        )),
+    }
+}
+
 pub async fn respond(
     stream: impl AsyncRead + AsyncWrite + Unpin,
     status: impl FnOnce() -> Status,
@@ -94,9 +184,19 @@ pub async fn respond(
 }
 
 pub async fn respond_with_clipboard(
+    stream: impl AsyncRead + AsyncWrite + Unpin,
+    status: impl FnOnce() -> Status,
+    clipboard: impl FnOnce() -> ClipboardStatus,
+) -> io::Result<()> {
+    respond_with_transfers(stream, status, clipboard, |_| None, |_| false).await
+}
+
+pub async fn respond_with_transfers(
     mut stream: impl AsyncRead + AsyncWrite + Unpin,
     status: impl FnOnce() -> Status,
     clipboard: impl FnOnce() -> ClipboardStatus,
+    offer: impl FnOnce(u64) -> Option<Approval>,
+    decide: impl FnOnce(ApprovalDecision) -> bool,
 ) -> io::Result<()> {
     let mut request = [0; REQUEST.len()];
     stream.read_exact(&mut request).await?;
@@ -109,6 +209,30 @@ pub async fn respond_with_clipboard(
             response[HEADER.len() + 4..].copy_from_slice(&status.uptime_secs.to_be_bytes());
             stream.write_all(&response).await?;
         }
+        OFFER => {
+            let id = stream.read_u64().await?;
+            let offer = offer(id);
+            stream.write_all(HEADER).await?;
+            stream.write_u8(u8::from(offer.is_some())).await?;
+            if let Some(offer) = offer {
+                let len = u8::try_from(offer.label.len()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "clipboard offer label is too long",
+                    )
+                })?;
+                stream.write_u64(offer.bytes).await?;
+                stream.write_u8(len).await?;
+                stream.write_all(offer.label.as_bytes()).await?;
+            }
+        }
+        DECIDE => {
+            let id = stream.read_u64().await?;
+            let accept = read_flag(&mut stream).await?;
+            let queued = decide(ApprovalDecision { id, accept });
+            stream.write_all(HEADER).await?;
+            stream.write_u8(u8::from(queued)).await?;
+        }
         CLIPBOARD => {
             let state = clipboard();
             let mut response = [0; HEADER.len() + 3];
@@ -119,6 +243,10 @@ pub async fn respond_with_clipboard(
                 state.incoming as u8,
             ]);
             stream.write_all(&response).await?;
+            for progress in [state.sent, state.received] {
+                stream.write_u64(progress.bytes).await?;
+                stream.write_u64(progress.total).await?;
+            }
         }
         _ => {
             return Err(io::Error::new(
@@ -167,6 +295,7 @@ mod tests {
             connected: true,
             outgoing: ClipboardPhase::Copying,
             incoming: ClipboardPhase::Ready,
+            ..ClipboardStatus::default()
         };
         let (reply, sent) = tokio::join!(
             query_clipboard(&mut client),
@@ -178,6 +307,48 @@ mod tests {
         );
         assert_eq!(reply.unwrap(), expected);
         sent.unwrap();
+    }
+
+    #[tokio::test]
+    async fn approval_is_queried_and_decided_by_offer_identifier() {
+        use super::{Approval, ApprovalDecision, approval, decide, respond_with_transfers};
+
+        let (mut client, mut server) = duplex(8);
+        let (offer, served) = tokio::join!(
+            approval(&mut client, 42),
+            respond_with_transfers(
+                &mut server,
+                || panic!("expected approval query"),
+                || panic!("expected approval query"),
+                |id| (id == 42).then(|| Approval {
+                    id,
+                    bytes: 6_000_000,
+                    label: "sample.bin".into()
+                }),
+                |_| panic!("expected approval query")
+            ),
+        );
+        served.unwrap();
+        let offer = offer.unwrap().unwrap();
+        assert_eq!(
+            (offer.id, offer.bytes, offer.label.as_str()),
+            (42, 6_000_000, "sample.bin")
+        );
+        for (id, expected) in [(41, false), (42, true)] {
+            let (mut client, mut server) = duplex(8);
+            let (decision, served) = tokio::join!(
+                decide(&mut client, ApprovalDecision { id, accept: true }),
+                respond_with_transfers(
+                    &mut server,
+                    || panic!("expected decision"),
+                    || panic!("expected decision"),
+                    |_| panic!("expected decision"),
+                    |decision| decision.id == 42 && decision.accept
+                ),
+            );
+            served.unwrap();
+            assert_eq!(decision.unwrap(), expected);
+        }
     }
 
     #[tokio::test]

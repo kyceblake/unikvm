@@ -7,9 +7,9 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont,
-    NSProgressIndicator, NSProgressIndicatorStyle, NSTextField, NSView, NSWindow, NSWindowDelegate,
-    NSWindowStyleMask,
+    NSAlert, NSAlertSecondButtonReturn, NSApplication, NSApplicationActivationPolicy,
+    NSBackingStoreType, NSColor, NSFont, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSTextField, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer,
@@ -52,7 +52,13 @@ pub(super) fn show(read: impl Fn() -> View + 'static) -> io::Result<()> {
         let rows = std::array::from_fn(|index| {
             let top = 55.0 + index as f64 * 68.0;
             label(&content, main, HEADINGS[index], top, true);
-            let text = label(&content, main, view.rows[index].text, top + 22.0, false);
+            let text = label(
+                &content,
+                main,
+                &view.rows[index].message(),
+                top + 22.0,
+                false,
+            );
             let progress = NSProgressIndicator::initWithFrame(
                 NSProgressIndicator::alloc(main),
                 rect(top + 44.0, 12.0),
@@ -132,8 +138,9 @@ struct RowControls {
 
 impl RowControls {
     fn update(&self, previous: Row, next: Row) {
-        if previous.text != next.text {
-            self.text.setStringValue(&NSString::from_str(next.text));
+        if previous != next {
+            self.text
+                .setStringValue(&NSString::from_str(&next.message()));
         }
         if previous.copying != next.copying {
             self.set_progress(next.copying);
@@ -151,6 +158,28 @@ impl RowControls {
             }
         }
     }
+}
+
+pub(super) fn approve(item: &str, size: &str) -> io::Result<bool> {
+    let main = MainThreadMarker::new()
+        .ok_or_else(|| io::Error::other("AppKit requires the main thread"))?;
+    autoreleasepool(|_| {
+        let app = NSApplication::sharedApplication(main);
+        if !app.setActivationPolicy(NSApplicationActivationPolicy::Regular) {
+            return Err(io::Error::other("could not activate the clipboard prompt"));
+        }
+        app.finishLaunching();
+        #[allow(deprecated)]
+        app.activateIgnoringOtherApps(true);
+        let alert = NSAlert::new(main);
+        alert.setMessageText(&NSString::from_str("Receive a clipboard copy?"));
+        alert.setInformativeText(&NSString::from_str(&format!(
+            "Your paired computer offered {item} ({size})."
+        )));
+        alert.addButtonWithTitle(&NSString::from_str("Decline"));
+        alert.addButtonWithTitle(&NSString::from_str("Receive"));
+        Ok(alert.runModal() == NSAlertSecondButtonReturn)
+    })
 }
 
 struct Monitor {

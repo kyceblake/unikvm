@@ -291,7 +291,7 @@ fn transport_config() -> Arc<TransportConfig> {
     let mut transport = TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(VarInt::from_u32(1))
-        .max_concurrent_uni_streams(VarInt::from_u32(1))
+        .max_concurrent_uni_streams(VarInt::from_u32(2))
         // Clipboard frames can share the connection with latency-sensitive input.
         .stream_receive_window(VarInt::from_u32(16 * 1024))
         .receive_window(VarInt::from_u32(32 * 1024))

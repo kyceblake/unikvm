@@ -20,6 +20,7 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+blake3 = { version = "1.8.7", features = ["pure"] }
 core-foundation = "0.10.1"
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 foreign-types = "0.5.0"
@@ -50,6 +51,7 @@ unikvm-core = { path = "crates/core" }
 unikvm-network = { path = "crates/network" }
 unikvm-platform = { path = "crates/platform" }
 unikvm-protocol = { path = "crates/protocol" }
+unikvm-transfer = { path = "crates/transfer" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

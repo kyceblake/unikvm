@@ -68,6 +68,7 @@ async fn native_status_transport_retains_endpoint_and_recovers_after_abandoned_c
             connected: true,
             outgoing: ClipboardPhase::Ready,
             incoming: ClipboardPhase::Copying,
+            ..ClipboardStatus::default()
         };
         let (received, served) = tokio::join!(
             async {

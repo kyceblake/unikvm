@@ -3,9 +3,8 @@
 use std::io;
 use std::num::NonZeroU64;
 
-use unikvm_core::clipboard::Content;
 use unikvm_core::device::DeviceId;
-use unikvm_protocol::clipboard::{Revision, Update};
+use unikvm_protocol::clipboard::Revision;
 
 /// Keep one instance for the lifetime of a mutually enabled clipboard session.
 /// A fresh session observes new clipboard changes without sending existing text.
@@ -26,8 +25,15 @@ impl Revisions {
 
     /// Record a physical or application clipboard change. Native notifications
     /// caused by applying a peer update are filtered before calling this.
-    pub fn local_change(&mut self, content: Content) -> io::Result<Update> {
-        let counter = self.latest.map_or(0, |revision| revision.counter.get());
+    pub fn local_change(&mut self) -> io::Result<Revision> {
+        self.local_change_after(None)
+    }
+
+    pub fn local_change_after(&mut self, remote: Option<NonZeroU64>) -> io::Result<Revision> {
+        let counter = self
+            .latest
+            .map_or(0, |revision| revision.counter.get())
+            .max(remote.map_or(0, NonZeroU64::get));
         let counter = counter
             .checked_add(1)
             .and_then(NonZeroU64::new)
@@ -36,23 +42,21 @@ impl Revisions {
             counter,
             origin: self.local,
         };
-        let update = Update::new(revision, content)?;
         self.latest = Some(revision);
-        Ok(update)
+        Ok(revision)
     }
 
     /// Record a newer update after a successful native write.
-    pub fn accept_remote(&mut self, update: &Update) -> bool {
-        if !self.is_new_remote(update) {
+    pub fn accept_remote(&mut self, revision: Revision) -> bool {
+        if !self.is_new_remote(revision) {
             return false;
         }
-        self.latest = Some(update.revision());
+        self.latest = Some(revision);
         true
     }
 
     /// Check before writing so a busy native clipboard can be retried.
-    pub fn is_new_remote(&self, update: &Update) -> bool {
-        let revision = update.revision();
+    pub fn is_new_remote(&self, revision: Revision) -> bool {
         revision.origin == self.peer && self.latest.is_none_or(|latest| revision > latest)
     }
 }
@@ -61,13 +65,6 @@ impl Revisions {
 mod tests {
     use super::*;
 
-    fn text(plain: &str, html: Option<&str>) -> Content {
-        Content::Text {
-            plain: plain.into(),
-            html: html.map(str::to_owned),
-        }
-    }
-
     const A: DeviceId = DeviceId([1; 16]);
     const B: DeviceId = DeviceId([2; 16]);
 
@@ -75,29 +72,27 @@ mod tests {
     fn concurrent_updates_converge_and_replay_cannot_replace_newer_text() {
         let mut a = Revisions::new(A, B);
         let mut b = Revisions::new(B, A);
-        let from_a = a.local_change(text("first", None)).unwrap();
-        let from_b = b
-            .local_change(text("second", Some("<b>second</b>")))
-            .unwrap();
-        assert!(a.accept_remote(&from_b));
-        assert!(!b.accept_remote(&from_a));
-        assert!(!a.accept_remote(&from_b));
+        let from_a = a.local_change().unwrap();
+        let from_b = b.local_change().unwrap();
+        assert!(a.accept_remote(from_b));
+        assert!(!b.accept_remote(from_a));
+        assert!(!a.accept_remote(from_b));
 
-        let follow_up = a.local_change(text("third", None)).unwrap();
-        assert!(follow_up.revision() > from_b.revision());
-        assert!(b.accept_remote(&follow_up));
-        assert!(!b.accept_remote(&from_a));
+        let follow_up = a.local_change().unwrap();
+        assert!(follow_up > from_b);
+        assert!(b.accept_remote(follow_up));
+        assert!(!b.accept_remote(from_a));
         assert_eq!(a.latest, b.latest);
     }
 
     #[test]
     fn rejects_updates_with_an_origin_other_than_the_pinned_peer() {
         let mut a = Revisions::new(A, B);
-        let local = a.local_change(text("original", None)).unwrap();
+        let local = a.local_change().unwrap();
         let mut unrelated = Revisions::new(DeviceId([3; 16]), A);
-        let forged = unrelated.local_change(text("unrelated", None)).unwrap();
-        assert!(!a.accept_remote(&local));
-        assert!(!a.accept_remote(&forged));
-        assert_eq!(a.latest, Some(local.revision()));
+        let forged = unrelated.local_change().unwrap();
+        assert!(!a.accept_remote(local));
+        assert!(!a.accept_remote(forged));
+        assert_eq!(a.latest, Some(local));
     }
 }
