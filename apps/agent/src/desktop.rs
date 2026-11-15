@@ -124,6 +124,9 @@ impl Helper {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if args.first() == Some(&"drag-receive") {
+            command.stderr(Stdio::inherit());
+        }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

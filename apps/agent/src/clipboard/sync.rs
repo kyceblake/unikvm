@@ -573,7 +573,10 @@ impl Link<'_> {
                                 self.apply()?;
                             }
                             Ok(None) => {}
-                            Err(_) => self.finish_incoming(Phase::Failed, true)?,
+                            Err(error) => {
+                                tracing::warn!(%error, "clipboard file receive failed");
+                                self.finish_incoming(Phase::Failed, true)?;
+                            }
                         }
                     }
                 }

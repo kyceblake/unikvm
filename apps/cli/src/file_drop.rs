@@ -67,9 +67,10 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     };
     let id = offer.id;
     let delivery = Arc::new(Mutex::new(Delivery::default()));
-    let window_ready = || {
+    let ready_runtime = runtime.clone();
+    let window_ready = move || {
         if let Some(id) = granted
-            && runtime
+            && ready_runtime
                 .block_on(request(Command::Armed(id)))
                 .map_err(io::Error::other)?
                 != Reply::Recorded
@@ -78,7 +79,7 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         }
         #[cfg(target_os = "windows")]
         if returned {
-            runtime
+            ready_runtime
                 .block_on(async {
                     timeout(Duration::from_secs(5), async {
                         loop {

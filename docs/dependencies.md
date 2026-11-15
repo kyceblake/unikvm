@@ -58,7 +58,7 @@ The Windows drop helper reuses the locked Shell and OLE bindings from the probe.
 
 The Finder edge helper uses the already locked AppKit drag pasteboard and window APIs. The Mac input monitor uses its existing Quartz event bindings to end the local drag once the receiving desktop is armed. [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
 
-The Finder drop helper uses `block2` 0.6.2 (Rust 1.71, MIT), maintained with the existing `objc2` bindings. The macOS-only dependency handles the AppKit file promise completion block and the synchronous Foundation file-coordination block. It matches the version range in the locked AppKit and Foundation bindings. [block2 manifest](https://docs.rs/crate/block2/0.6.2/source/Cargo.toml) · [AppKit promise delegate](https://developer.apple.com/documentation/appkit/nsfilepromiseproviderdelegate)
+The Finder drop helper uses `block2` 0.6.2 (Rust 1.71, MIT), maintained with the existing `objc2` bindings. The macOS-only dependency handles the AppKit file promise completion block. AppKit supplies destination write coordination; a native regression also uses a synchronous Foundation coordination block to verify that the delegate does not acquire a second claim. It matches the version range in the locked AppKit and Foundation bindings. [block2 manifest](https://docs.rs/crate/block2/0.6.2/source/Cargo.toml) · [AppKit promise delegate](https://developer.apple.com/documentation/appkit/nsfilepromiseproviderdelegate)
 
 ## Reviewed for later milestones
 

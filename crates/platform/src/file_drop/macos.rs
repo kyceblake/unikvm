@@ -1,16 +1,16 @@
 #![allow(unsafe_code)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, OsStr};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::ptr::{NonNull, null_mut};
+use std::ptr::null_mut;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use block2::{DynBlock, StackBlock};
+use block2::DynBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2::{
@@ -24,8 +24,8 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSArray, NSError, NSFileCoordinator, NSFileCoordinatorWritingOptions, NSObject,
-    NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSize, NSString, NSTimer, NSURL,
+    NSArray, NSError, NSObject, NSObjectProtocol, NSOperationQueue, NSPoint, NSRect, NSSize,
+    NSString, NSTimer, NSURL,
 };
 use unikvm_core::geometry::Edge;
 
@@ -39,7 +39,7 @@ pub fn run_received(
     name: &str,
     size: u64,
     verified_path: impl Fn() -> io::Result<PathBuf> + Send + Sync + 'static,
-    ready: impl FnOnce() -> io::Result<()>,
+    ready: impl FnOnce() -> io::Result<()> + 'static,
 ) -> io::Result<bool> {
     let main = MainThreadMarker::new()
         .ok_or_else(|| io::Error::other("AppKit requires the main thread"))?;
@@ -99,6 +99,7 @@ pub fn run_received(
             started: Cell::new(false),
             ended: Cell::new(None),
             opened: Instant::now(),
+            ready: RefCell::new(Some(Box::new(ready))),
         });
         // SAFETY: The allocated subclass is initialized with an NSView frame on this thread.
         let view: Retained<DragView> = unsafe {
@@ -107,7 +108,6 @@ pub fn run_received(
         window.setContentView(Some(&view));
         app.finishLaunching();
         window.orderFrontRegardless();
-        ready()?;
         // SAFETY: The retained main-thread view implements checkCompletion: with one NSTimer.
         let timer = unsafe {
             NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
@@ -184,9 +184,27 @@ define_class!(
                 }
             };
             let copied = can_write
-                && (data.verified_path)()
-                    .and_then(|path| write_promise(&path, url, data.size))
-                    .is_ok();
+                && match (data.verified_path)() {
+                    Ok(path) => match write_promise(&path, url, data.size) {
+                        Ok(()) => true,
+                        Err(error) => {
+                            eprintln!(
+                                "Finder promise destination failed: kind={:?} os={:?}",
+                                error.kind(),
+                                error.raw_os_error()
+                            );
+                            false
+                        }
+                    },
+                    Err(error) => {
+                        eprintln!(
+                            "Finder promise transfer failed: kind={:?} os={:?}",
+                            error.kind(),
+                            error.raw_os_error()
+                        );
+                        false
+                    }
+                };
             if copied {
                 completion.call((null_mut(),));
             } else {
@@ -211,12 +229,15 @@ define_class!(
     }
 );
 
+type Ready = Box<dyn FnOnce() -> io::Result<()>>;
+
 struct DragData {
     promise: Retained<Promise>,
     provider: Retained<NSFilePromiseProvider>,
     started: Cell<bool>,
     ended: Cell<Option<Instant>>,
     opened: Instant,
+    ready: RefCell<Option<Ready>>,
 }
 
 define_class!(
@@ -282,6 +303,18 @@ define_class!(
         #[unsafe(method(checkCompletion:))]
         fn check_completion(&self, _timer: &NSTimer) {
             let data = self.ivars();
+            if let Some(ready) = data.ready.borrow_mut().take() {
+                // Arm only after AppKit's event loop has entered and the window
+                // is displayed; the first injected down must target this view.
+                if let Some(window) = self.window() {
+                    window.displayIfNeeded();
+                }
+                NSApplication::sharedApplication(self.mtm()).updateWindows();
+                if let Err(error) = ready() {
+                    eprintln!("Finder drop readiness failed: kind={:?}", error.kind());
+                    *data.promise.ivars().state.lock().unwrap() = Delivery::Failed;
+                }
+            }
             let ended = data.ended.get();
             let finished = {
                 let mut state = data.promise.ivars().state.lock().unwrap();
@@ -310,29 +343,14 @@ define_class!(
 );
 
 fn write_promise(source: &Path, url: &NSURL, size: u64) -> io::Result<()> {
-    let result = Cell::new(Err(io::Error::other(
-        "could not coordinate the drop destination",
-    )));
-    let writer = StackBlock::new(|destination: NonNull<NSURL>| {
-        // SAFETY: The file coordinator supplies a live URL for the duration of this callback.
-        let destination = unsafe { destination.as_ref() };
-        if destination.isFileURL() {
-            // SAFETY: The NSURL keeps its NUL-terminated filesystem representation alive.
-            let path = unsafe { CStr::from_ptr(destination.fileSystemRepresentation().as_ptr()) };
-            result.set(copy_file(
-                source,
-                Path::new(OsStr::from_bytes(path.to_bytes())),
-                size,
-            ));
-        }
-    });
-    NSFileCoordinator::new().coordinateWritingItemAtURL_options_error_byAccessor(
-        url,
-        NSFileCoordinatorWritingOptions::empty(),
-        None,
-        &writer,
-    );
-    result.into_inner()
+    // AppKit invokes this delegate inside its coordinated write. Starting a new
+    // coordinator here waits on that same destination claim and deadlocks.
+    if !url.isFileURL() {
+        return Err(io::Error::other("invalid file promise destination"));
+    }
+    // SAFETY: The NSURL keeps its NUL-terminated filesystem representation alive.
+    let path = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) };
+    copy_file(source, Path::new(OsStr::from_bytes(path.to_bytes())), size)
 }
 
 fn copy_file(source: &Path, destination: &Path, size: u64) -> io::Result<()> {
@@ -356,6 +374,35 @@ fn copy_file(source: &Path, destination: &Path, size: u64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires native macOS file coordination"]
+    fn promise_writes_inside_the_callers_existing_coordination() {
+        use block2::StackBlock;
+        use objc2_foundation::{NSFileCoordinator, NSFileCoordinatorWritingOptions};
+        use std::ptr::NonNull;
+        autoreleasepool(|_| {
+            let source = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(source.path(), b"coordinated promise").unwrap();
+            let folder = tempfile::tempdir().unwrap();
+            let destination = folder.path().join("promise.bin");
+            let url = NSURL::fileURLWithPath(&NSString::from_str(destination.to_str().unwrap()));
+            let result = Cell::new(None);
+            let writer = StackBlock::new(|url: NonNull<NSURL>| {
+                // SAFETY: The outer coordinator keeps this URL alive during its accessor.
+                let url = unsafe { url.as_ref() };
+                result.set(Some(write_promise(source.path(), url, 19)));
+            });
+            NSFileCoordinator::new().coordinateWritingItemAtURL_options_error_byAccessor(
+                &url,
+                NSFileCoordinatorWritingOptions::empty(),
+                None,
+                &writer,
+            );
+            result.into_inner().unwrap().unwrap();
+            assert_eq!(std::fs::read(destination).unwrap(), b"coordinated promise");
+        });
+    }
 
     #[test]
     fn publishes_complete_bytes_without_clobbering_or_leaving_partial_files() {
