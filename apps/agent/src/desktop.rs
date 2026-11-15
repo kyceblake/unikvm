@@ -8,13 +8,26 @@ use unikvm_protocol::tray::{Connection, Peer, Phase, View};
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod file_drop;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub(crate) use file_drop::{Drag, NativeDrops};
+
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[derive(Clone)]
+pub(crate) struct OutboundDrag {
+    pub route: Drag,
+    pub path: std::path::PathBuf,
+}
 
 #[derive(Clone)]
 pub struct Desktop {
     pub view: watch::Sender<View>,
     pub cancels: broadcast::Sender<u64>,
     #[cfg(any(target_os = "windows", target_os = "macos"))]
-    pub file_drop: file_drop::NativeDrops,
+    pub file_drop: NativeDrops,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub drag_offers: broadcast::Sender<OutboundDrag>,
+    #[cfg(target_os = "macos")]
+    pub drag_starts: broadcast::Sender<std::path::PathBuf>,
 }
 
 impl Desktop {
@@ -40,7 +53,11 @@ impl Desktop {
                 view: watch::channel(view).0,
                 cancels: broadcast::channel(4).0,
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
-                file_drop: file_drop::NativeDrops::default(),
+                file_drop: NativeDrops::default(),
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                drag_offers: broadcast::channel(2).0,
+                #[cfg(target_os = "macos")]
+                drag_starts: broadcast::channel(2).0,
             },
             pins,
         ))
@@ -91,6 +108,10 @@ pub struct Helper(std::process::Child);
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 impl Helper {
     pub fn start() -> std::io::Result<Self> {
+        Self::launch(&["tray", "--agent"]).map(Self)
+    }
+
+    pub fn launch(args: &[&str]) -> std::io::Result<std::process::Child> {
         use std::process::{Command, Stdio};
         let binary = std::env::current_exe()?.with_file_name(if cfg!(windows) {
             "unikvm.exe"
@@ -99,8 +120,7 @@ impl Helper {
         });
         let mut command = Command::new(binary);
         command
-            .arg("tray")
-            .arg("--agent")
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -109,7 +129,12 @@ impl Helper {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000);
         }
-        command.spawn().map(Self)
+        command.spawn()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn source(side: &str) -> std::io::Result<Self> {
+        Self::launch(&["drag-source", side]).map(Self)
     }
 
     pub async fn stop(mut self) {

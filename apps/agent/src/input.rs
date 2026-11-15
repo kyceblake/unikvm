@@ -14,6 +14,7 @@ pub struct Control {
     mode: InputMode,
     side: Option<PeerSide>,
     allow_locked_receive: bool,
+    file_drag: bool,
 }
 
 impl Control {
@@ -31,11 +32,16 @@ impl Control {
             mode: config.mode,
             side: config.peer_side,
             allow_locked_receive: config.allow_locked_receive,
+            file_drag: config.file_drag,
         })
     }
 
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub async fn run(self, paste: Option<unikvm_platform::clipboard::PasteRequests>) -> Result<()> {
+    pub async fn run(
+        self,
+        paste: Option<unikvm_platform::clipboard::PasteRequests>,
+        desktop: crate::desktop::Desktop,
+    ) -> Result<()> {
         use tracing::info;
         use unikvm_core::geometry::Edge;
         use unikvm_platform::input::{Capture, EdgeLayout};
@@ -54,6 +60,31 @@ impl Control {
             .context("read primary display for edge switching")?;
         let mut capture =
             Capture::with_paste(allow_send, edge, paste).context("start local input monitor")?;
+        let native = (cfg!(windows) && self.file_drag).then(|| desktop.file_drop.clone());
+        #[cfg(target_os = "macos")]
+        let (local_drag, _source) = if self.file_drag
+            && let Some(edge) = edge
+        {
+            let route = send::DragSender {
+                starts: desktop.drag_starts.subscribe(),
+                offers: desktop.drag_offers.clone(),
+            };
+            let side = match edge.side {
+                Edge::Left => "--left",
+                _ => "--right",
+            };
+            match crate::desktop::Helper::source(side) {
+                Ok(source) => (Some(route), Some(source)),
+                Err(_) => {
+                    tracing::warn!("could not open the native Finder drag helper");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+        #[cfg(target_os = "windows")]
+        let local_drag = None;
         if let Some(edge) = edge {
             info!(side = ?edge.side, "primary display edge switching enabled");
         }
@@ -69,7 +100,14 @@ impl Control {
         }
         match self.mode {
             InputMode::Send => {
-                send::run(&mut capture, self.connections, self.peer, &focus, None).await
+                send::run(
+                    &mut capture,
+                    self.connections,
+                    self.peer,
+                    &focus,
+                    (None, None),
+                )
+                .await
             }
             InputMode::Receive => {
                 receive::run(
@@ -81,6 +119,7 @@ impl Control {
                     receive::Options {
                         edge: None,
                         allow_locked_receive: self.allow_locked_receive,
+                        native: None,
                     },
                 )
                 .await
@@ -89,8 +128,8 @@ impl Control {
                 let control = capture.control().clone();
                 let signals = capture.shortcuts.clone();
                 tokio::select! {
-                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, edge.map(|edge| edge.side)) => result,
-                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive }) => result,
+                    result = send::run(&mut capture, self.connections.clone(), self.peer, &focus, (edge.map(|edge| edge.side), local_drag)) => result,
+                    result = receive::run(control, signals, self.connections, self.peer, &focus, receive::Options { edge, allow_locked_receive: self.allow_locked_receive, native }) => result,
                 }
             }
         }
@@ -104,6 +143,7 @@ impl Control {
             self.mode,
             self.side,
             self.allow_locked_receive,
+            self.file_drag,
         );
         bail!("input sharing is available on Windows and macOS")
     }

@@ -180,12 +180,14 @@ pub(super) fn run_hooks(
                     generation,
                     expires,
                     edge,
+                    drag,
                 } if state.stopped_generation != Some(generation) => {
                     if state.generation != Some(generation) {
                         state.generation = Some(generation);
                         state.arm_until = now + ARM_DELAY;
                     }
-                    if now >= expires || (!state.remote && now >= state.arm_until) {
+                    if drag.is_some() || now >= expires || (!state.remote && now >= state.arm_until)
+                    {
                         state.emergency();
                     } else if !state.remote && !physical_input_held() {
                         if check_input_desktop().is_err() {
@@ -819,6 +821,7 @@ mod tests {
             generation: 1,
             expires: Instant::now() + Duration::from_secs(1),
             edge: true,
+            drag: None,
         });
         hooks.commands = receiver;
         hooks.remote = true;

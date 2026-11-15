@@ -204,6 +204,8 @@ async fn generation(
                     .run(
                         #[cfg(any(target_os = "windows", target_os = "macos"))]
                         paste.clone(),
+                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                        local.desktop.clone(),
                     )
                     .await;
                 if let Err(error) = result {
@@ -324,6 +326,30 @@ async fn serve(
             (
                 |command| local.command(command, &exit),
                 |drop_command| {
+                    #[cfg(target_os = "macos")]
+                    if let file_drop::Command::Start {
+                        ref path,
+                        observed_ms,
+                    } = drop_command
+                        && *local.requested.borrow() == Requested::Online
+                    {
+                        use std::time::{SystemTime, UNIX_EPOCH};
+                        let path = std::path::PathBuf::from(path);
+                        let fresh = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .is_ok_and(|age| {
+                                age.as_millis()
+                                    .checked_sub(u128::from(observed_ms))
+                                    .is_some_and(|elapsed| elapsed <= 500)
+                            });
+                        if fresh
+                            && path.is_absolute()
+                            && local.desktop.drag_starts.send(path).is_ok()
+                        {
+                            return file_drop::Reply::Recorded;
+                        }
+                        return file_drop::Reply::Unavailable;
+                    }
                     #[cfg(any(target_os = "windows", target_os = "macos"))]
                     if *local.requested.borrow() == Requested::Online {
                         return local.desktop.file_drop.command(drop_command);

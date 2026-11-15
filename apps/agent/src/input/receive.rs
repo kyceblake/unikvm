@@ -6,21 +6,31 @@ use tokio::sync::watch;
 use tokio::time::{Instant, timeout, timeout_at};
 use tracing::{info, warn};
 use unikvm_core::focus::{ControlSession, FocusEvent, FocusState, SessionId};
-use unikvm_core::input::InputEvent;
+use unikvm_core::input::{ButtonState, InputEvent, PointerButton};
 use unikvm_network::identity::Fingerprint;
 use unikvm_platform::input::{CaptureControl, EdgeLayout, InputSink, MotionPacer, Shortcut};
 use unikvm_protocol::input::{
-    self, DENY, EDGE_REQUEST, Frame, GRANT, HEARTBEAT_ACK, LEASE, REQUEST,
+    self, DENY, DRAG_PREPARE, DRAG_REQUEST, EDGE_REQUEST, Frame, GRANT, HEARTBEAT_ACK, LEASE,
+    REQUEST,
 };
 
 use super::Focus;
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_millis(750);
+const DRAG_SETUP: Duration = Duration::from_secs(4);
+const DRAG_BUTTON_DOWN: InputEvent = InputEvent::PointerButton {
+    button: PointerButton::Primary,
+    state: ButtonState::Pressed,
+};
+const DRAG_BUTTON_UP: InputEvent = InputEvent::PointerButton {
+    button: PointerButton::Primary,
+    state: ButtonState::Released,
+};
 
-#[derive(Clone, Copy)]
 pub(super) struct Options {
     pub edge: Option<EdgeLayout>,
     pub allow_locked_receive: bool,
+    pub native: Option<crate::desktop::NativeDrops>,
 }
 
 pub async fn run(
@@ -49,9 +59,9 @@ pub async fn run(
                 &mut send,
                 &mut recv,
                 state,
-                session,
+                (session, connection.stable_id()),
                 &mut signals,
-                options,
+                &options,
                 &control,
             )
             .await;
@@ -82,9 +92,9 @@ async fn receive(
     send: &mut quinn::SendStream,
     recv: &mut quinn::RecvStream,
     state: &Cell<FocusState>,
-    session: ControlSession,
+    (session, connection): (ControlSession, usize),
     signals: &mut watch::Receiver<Shortcut>,
-    options: Options,
+    options: &Options,
     control: &CaptureControl,
 ) -> Result<()> {
     let mut request = [0; REQUEST.len()];
@@ -92,15 +102,35 @@ async fn receive(
     timeout_at(admission, recv.read_exact(&mut request))
         .await
         .context("input request timed out")??;
+    let mut route = None;
     let entry = match (&request, options.edge) {
         (REQUEST, _) => None,
-        (EDGE_REQUEST, Some(edge)) => {
+        (EDGE_REQUEST | DRAG_REQUEST, Some(edge)) => {
+            if &request == DRAG_REQUEST && options.native.is_none() {
+                deny(send).await;
+                return Ok(());
+            }
             let mut entry = [0; 3];
             timeout_at(admission, recv.read_exact(&mut entry))
                 .await
                 .context("edge request timed out")??;
             match input::edge_entry(entry) {
-                Some((side, height)) if side == edge.side => Some((edge, height)),
+                Some((side, height)) if side == edge.side => {
+                    if &request == DRAG_REQUEST {
+                        use tokio::io::AsyncReadExt;
+                        let nonce = timeout_at(admission, recv.read_u64()).await??;
+                        let Some(nonce) = std::num::NonZeroU64::new(nonce) else {
+                            deny(send).await;
+                            return Ok(());
+                        };
+                        route = Some(crate::desktop::Drag {
+                            peer: session.peer,
+                            connection,
+                            nonce,
+                        });
+                    }
+                    Some((edge, height))
+                }
                 _ => {
                     deny(send).await;
                     return Ok(());
@@ -131,17 +161,41 @@ async fn receive(
 
     let edge_session = entry.is_some();
     control.show_idle_cursor();
+    let mut drag = match route {
+        Some(route) => {
+            let drops = options
+                .native
+                .as_ref()
+                .context("native delivery is disabled")?;
+            if !drops.reserve(route) {
+                deny(send).await;
+                return Ok(());
+            }
+            Some(ReceivingDrag {
+                drops,
+                route,
+                id: None,
+                helper: None,
+                released: false,
+            })
+        }
+        None => None,
+    };
     let result = tokio::select! {
         biased;
         local = wait_local(signals, baseline) => local.map(|()| (true, None)),
         result = async {
+            if let (Some(drag), Some((edge, _))) = (&mut drag, entry) {
+                timeout(DRAG_SETUP, drag.prepare(send, edge.side)).await.context("native drop helper timed out")??;
+            }
             timeout(ADMISSION_TIMEOUT, send.write_all(&[GRANT]))
                 .await
                 .context("input grant timed out")??;
             info!("receiving peer input");
-            inject(&mut sink, send, recv, entry, options.edge).await
+            inject(&mut sink, send, recv, entry, options.edge, &mut drag).await
         } => result.map(|height| (false, height)),
     };
+    drop(drag);
     sink.release_all().context("release synthetic input")?;
     let (local, height) = result?;
     if let Some(height) = height {
@@ -161,6 +215,72 @@ async fn receive(
         info!("incoming input session closed");
     }
     Ok(())
+}
+
+struct ReceivingDrag<'a> {
+    drops: &'a crate::desktop::NativeDrops,
+    route: crate::desktop::Drag,
+    id: Option<u64>,
+    helper: Option<std::process::Child>,
+    released: bool,
+}
+
+impl ReceivingDrag<'_> {
+    async fn prepare(
+        &mut self,
+        send: &mut quinn::SendStream,
+        side: unikvm_core::geometry::Edge,
+    ) -> Result<()> {
+        send.write_all(&[DRAG_PREPARE]).await?;
+        let id = loop {
+            if let Some(id) = self.drops.offered(self.route) {
+                break id;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        };
+        self.id = Some(id);
+        let side = match side {
+            unikvm_core::geometry::Edge::Left => "--left",
+            unikvm_core::geometry::Edge::Right => "--right",
+            _ => anyhow::bail!("invalid native drop edge"),
+        };
+        let helper = self.helper.insert(crate::desktop::Helper::launch(&[
+            "drag-receive",
+            side,
+            "--granted",
+            &id.to_string(),
+        ])?);
+        loop {
+            if helper.try_wait()?.is_some() {
+                anyhow::bail!("native drop helper exited");
+            }
+            if self.drops.armed(id) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+
+    fn released_button(&mut self, sink: &mut InputSink) -> Result<()> {
+        ensure!(
+            self.id.is_some_and(|id| self.drops.release(id)),
+            "native drop offer expired"
+        );
+        sink.send(DRAG_BUTTON_UP)?;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for ReceivingDrag<'_> {
+    fn drop(&mut self) {
+        self.drops.end_drag(self.route, self.released);
+        if !self.released
+            && let Some(helper) = &mut self.helper
+        {
+            let _ = helper.kill();
+        }
+    }
 }
 
 async fn deny(send: &mut quinn::SendStream) {
@@ -199,6 +319,7 @@ async fn inject(
     recv: &mut quinn::RecvStream,
     entry: Option<(EdgeLayout, u16)>,
     return_edge: Option<EdgeLayout>,
+    drag: &mut Option<ReceivingDrag<'_>>,
 ) -> Result<Option<u16>> {
     let mut deadline = Instant::now() + LEASE;
     // Reposition only after granting focus and reading the first heartbeat.
@@ -268,10 +389,22 @@ async fn inject(
                         return Ok(Some(height));
                     }
                 } else {
-                    sink.send(event)?;
+                    if let Some(drag) = drag.as_mut().filter(|drag| !drag.released)
+                        && event == DRAG_BUTTON_UP
+                    {
+                        drag.released_button(sink)?;
+                    } else {
+                        sink.send(event)?;
+                    }
                 }
             }
             Frame::Heartbeat(token) => {
+                if let Some(drag) = drag.as_mut().filter(|drag| !drag.released) {
+                    ensure!(
+                        drag.id.is_some_and(|id| drag.drops.armed(id)),
+                        "native drag ended before release"
+                    );
+                }
                 ensure!(
                     sink.check_permission(),
                     "local input posting became unavailable"
@@ -281,6 +414,9 @@ async fn inject(
                     && !sink.is_locked_receiver()
                 {
                     sink.enter_edge(edge, height)?;
+                    if drag.is_some() {
+                        sink.send(DRAG_BUTTON_DOWN)?;
+                    }
                 }
                 timeout_at(deadline, send.write_all(&[HEARTBEAT_ACK + token]))
                     .await

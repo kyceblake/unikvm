@@ -74,7 +74,15 @@ cargo run --locked -p unikvm-cli -- drag-receive --left
 
 Press and hold on the highlighted edge, move into the Explorer folder, and release. Windows should show the existing **Download / Decline** prompt only after release. Choose **Download** and compare the destination file's SHA-256 with the source. Test **Decline** and Escape with fresh offers and empty folders. The receiving clipboard should keep its existing contents. The Windows tray reports **File dropped** after Explorer reports a successful copy.
 
-This preview begins with a clipboard offer from a paired peer. The command starts the native drag on Windows. Automatic handoff of a file already being dragged on the sending desktop and native drops into Finder remain to be implemented.
+This preview begins with a clipboard offer from a paired peer. The command starts the native drag on Windows.
+
+### Test a Finder drag across the edge into Explorer
+
+Build the workspace and restart the agent and its desktop helper on both computers. In each local config, add `file_drag = true` under the existing `[input]` table. Keep bidirectional input, the configured peer side, and `[clipboard]` file sharing enabled for the same pinned peer. With the Mac on the left, use `peer_side = "right"` on the Mac and `peer_side = "left"` on Windows.
+
+Open an empty Explorer folder on Windows. Drag one regular file in Finder with the Mac's mouse or trackpad. Keep holding the primary button at the configured edge until the pointer appears on Windows, then move into Explorer and release. **Download / Decline** should appear only after release. Approve the drop, compare the destination file's SHA-256 with the source, and confirm the original stays in place. The Windows clipboard should retain its previous contents.
+
+Repeat with Escape before release and with **Decline** after release. Neither should create a destination file. Check that ordinary edge switching still works afterward. The preview supports Finder to Explorer, one regular file per drag, and the existing 50 MB limit. It requires an unlocked desktop and a free primary display edge. Restart the Mac helper after changing its display arrangement. [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard) · [Windows OLE drag loop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-dodragdrop)
 
 ## Run the Windows probe
 

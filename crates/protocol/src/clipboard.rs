@@ -72,6 +72,7 @@ pub struct Offer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Control {
     Offer(Offer),
+    DragOffer { nonce: NonZeroU64, offer: Offer },
     Decision { id: NonZeroU64, accept: bool },
     Receipt { id: NonZeroU64, applied: bool },
     Withdraw(NonZeroU64),
@@ -114,11 +115,23 @@ pub fn valid_name(name: &str) -> bool {
 
 pub async fn write(writer: &mut (impl AsyncWrite + Unpin), control: &Control) -> io::Result<()> {
     match control {
-        Control::Offer(offer) => {
+        Control::Offer(offer) | Control::DragOffer { offer, .. } => {
             offer.layout.total()?;
-            writer.write_u8(1).await?;
+            let nonce = match control {
+                Control::DragOffer { nonce, .. } => {
+                    if !matches!(&offer.layout, Layout::Files(files) if files.len() == 1) {
+                        return Err(invalid());
+                    }
+                    Some(*nonce)
+                }
+                _ => None,
+            };
+            writer.write_u8(if nonce.is_some() { 6 } else { 1 }).await?;
             writer.write_u64(offer.revision.counter.get()).await?;
             writer.write_all(&offer.revision.origin.0).await?;
+            if let Some(nonce) = nonce {
+                writer.write_u64(nonce.get()).await?;
+            }
             match &offer.layout {
                 Layout::Text { plain, html } => {
                     writer.write_u8(1).await?;
@@ -170,9 +183,14 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Control> 
     let tag = reader.read_u8().await?;
     let id = NonZeroU64::new(reader.read_u64().await?).ok_or_else(invalid)?;
     match tag {
-        1 => {
+        1 | 6 => {
             let mut origin = [0; 16];
             reader.read_exact(&mut origin).await?;
+            let nonce = if tag == 6 {
+                Some(NonZeroU64::new(reader.read_u64().await?).ok_or_else(invalid)?)
+            } else {
+                None
+            };
             let layout = match reader.read_u8().await? {
                 1 => Layout::Text {
                     plain: reader.read_u32().await?,
@@ -201,13 +219,21 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Control> 
                 _ => return Err(invalid()),
             };
             layout.total()?;
-            Ok(Control::Offer(Offer {
+            let offer = Offer {
                 revision: Revision {
                     counter: id,
                     origin: DeviceId(origin),
                 },
                 layout,
-            }))
+            };
+            if let Some(nonce) = nonce {
+                if !matches!(&offer.layout, Layout::Files(files) if files.len() == 1) {
+                    return Err(invalid());
+                }
+                Ok(Control::DragOffer { nonce, offer })
+            } else {
+                Ok(Control::Offer(offer))
+            }
         }
         2 => Ok(Control::Decision {
             id,
@@ -264,6 +290,44 @@ mod tests {
         write(&mut wire, &request).await.unwrap();
         assert_eq!(wire.len(), 9);
         assert_eq!(read(&mut wire.as_slice()).await.unwrap(), request);
+    }
+
+    #[tokio::test]
+    async fn drag_offer_carries_only_one_files_metadata_and_its_session_nonce() {
+        let offer = Offer {
+            revision: Revision {
+                counter: NonZeroU64::MIN,
+                origin: DeviceId([7; 16]),
+            },
+            layout: Layout::Files(vec![FileOffer {
+                name: "sample.txt".into(),
+                size: MAX_BYTES,
+            }]),
+        };
+        let control = Control::DragOffer {
+            nonce: NonZeroU64::new(83).unwrap(),
+            offer: offer.clone(),
+        };
+        let mut wire = Vec::new();
+        write(&mut wire, &control).await.unwrap();
+        assert!(wire.len() < 80);
+        assert_eq!(read(&mut wire.as_slice()).await.unwrap(), control);
+        wire[25..33].fill(0);
+        assert!(read(&mut wire.as_slice()).await.is_err());
+        assert!(
+            write(
+                &mut Vec::new(),
+                &Control::DragOffer {
+                    nonce: NonZeroU64::MIN,
+                    offer: Offer {
+                        layout: Layout::Text { plain: 1, html: 0 },
+                        ..offer
+                    }
+                }
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[test]

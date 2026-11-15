@@ -84,6 +84,8 @@ pub struct Shortcut {
     pub stop: u64,
     pub cancelled: bool,
     pub edge_height: Option<u16>,
+    pub drag_generation: Option<u64>,
+    pub drag_epoch: u64,
     /// Changes without recording the content of local activity.
     pub activity: u64,
 }
@@ -97,6 +99,7 @@ pub(super) enum Command {
         generation: u64,
         expires: Instant,
         edge: bool,
+        drag: Option<u64>,
     },
     HideAfterEdgeReturn {
         activity: u64,
@@ -187,10 +190,29 @@ impl Capture {
     }
 
     pub fn renew_session(&self, generation: u64, expires: Instant, edge: bool) {
+        self.renew_capture(generation, expires, edge, None);
+    }
+
+    pub fn renew_drag(&self, generation: u64, expires: Instant, epoch: u64) {
+        self.renew_capture(generation, expires, true, Some(epoch));
+    }
+
+    pub fn drag_height(&self, side: unikvm_core::geometry::Edge) -> Option<u16> {
+        #[cfg(target_os = "macos")]
+        return super::macos_capture::drag_height(side);
+        #[cfg(target_os = "windows")]
+        {
+            let _ = side;
+            None
+        }
+    }
+
+    fn renew_capture(&self, generation: u64, expires: Instant, edge: bool, drag: Option<u64>) {
         let previous = self.control.commands.send_replace(Command::Remote {
             generation,
             expires,
             edge,
+            drag,
         });
         if !matches!(previous, Command::Remote { generation: current, .. } if current == generation)
         {

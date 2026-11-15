@@ -26,6 +26,8 @@ use unikvm_protocol::local::{
 use unikvm_protocol::tray::{Phase as UiPhase, Transfer};
 use unikvm_transfer::{self as transfer, Prepared, Received};
 
+use crate::desktop::{Drag, OutboundDrag};
+
 use super::approval::{Prompt, make_approval};
 use super::staging::Staging;
 
@@ -298,7 +300,12 @@ impl Desktop {
         tokio::try_join!(
             write_controls(send, outgoing),
             read_controls(recv, incoming),
-            link.run(events, decisions, self.ui.cancels.subscribe())
+            link.run(
+                events,
+                decisions,
+                self.ui.cancels.subscribe(),
+                self.ui.drag_offers.subscribe()
+            )
         )?;
         Ok(())
     }
@@ -509,6 +516,7 @@ impl Link<'_> {
         mut events: mpsc::Receiver<Control>,
         decisions: &mut broadcast::Receiver<ApprovalDecision>,
         mut cancels: broadcast::Receiver<u64>,
+        mut drag_offers: broadcast::Receiver<OutboundDrag>,
     ) -> Result<()> {
         let mut poll = interval(POLL);
         poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -524,6 +532,12 @@ impl Link<'_> {
                     if let Ok(decision) = decision {
                         self.read_clipboard()?;
                         self.decide(decision)?;
+                    }
+                }
+                drag = drag_offers.recv() => {
+                    if let Ok(drag) = drag {
+                        self.read_clipboard()?;
+                        self.offer_drag(drag)?;
                     }
                 }
                 cancel = cancels.recv() => {
@@ -637,7 +651,21 @@ impl Link<'_> {
 
     fn control_received(&mut self, control: Control) -> Result<()> {
         match control {
-            Control::Offer(offer) => self.offer(offer),
+            Control::Offer(offer) => self.offer(offer, None),
+            Control::DragOffer { nonce, offer } => {
+                let drag = Drag {
+                    peer: self.peer,
+                    connection: self.connection.stable_id(),
+                    nonce,
+                };
+                if !self.desktop.ui.file_drop.expects(drag) {
+                    return self.tell(Control::Decision {
+                        id: offer.revision.counter,
+                        accept: false,
+                    });
+                }
+                self.offer(offer, Some(drag))
+            }
             Control::Request(id) => {
                 if self
                     .out
@@ -729,7 +757,51 @@ impl Link<'_> {
         }
     }
 
-    fn offer(&mut self, offer: Offer) -> Result<()> {
+    fn offer_drag(&mut self, drag: OutboundDrag) -> Result<()> {
+        if !self.files
+            || !self.available
+            || drag.route.peer != self.peer
+            || drag.route.connection != self.connection.stable_id()
+            || self.out.as_ref().is_some_and(|out| out.prepared.is_none())
+        {
+            return Ok(());
+        }
+        let prepared = match Prepared::new(Content::Files(vec![drag.path]), open_source) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if error.kind() == std::io::ErrorKind::FileTooLarge {
+                    self.outgoing_phase(Phase::TooLarge);
+                }
+                return Ok(());
+            }
+        };
+        self.withdraw(Phase::Skipped)?;
+        let total = prepared.layout.total()?;
+        let revision = self.revisions.local_change_after(self.newest)?;
+        self.tell(Control::DragOffer {
+            nonce: drag.route.nonce,
+            offer: Offer {
+                revision,
+                layout: prepared.layout.clone(),
+            },
+        })?;
+        self.out = Some(Outgoing {
+            id: revision.counter,
+            prepared: Some(prepared),
+            deadline: Instant::now() + FILE_OFFER,
+            awaiting_request: true,
+            transfer: None,
+            slot: None,
+        });
+        self.desktop.update_peer(self.index, |s| {
+            s.sequence = self.desktop.local_sequence.get();
+            s.phase = Phase::Offered;
+            s.progress = Progress { bytes: 0, total };
+        });
+        Ok(())
+    }
+
+    fn offer(&mut self, offer: Offer, drag: Option<Drag>) -> Result<()> {
         ensure!(
             offer.revision.origin == self.peer,
             "clipboard offer origin mismatch"
@@ -758,20 +830,34 @@ impl Link<'_> {
             return self.tell(Control::Decision { id, accept: false });
         };
         let deadline = Instant::now() + if file { FILE_OFFER } else { APPROVAL };
-        if cfg!(windows)
+        let native_offer = if cfg!(windows)
             && let Layout::Files(files) = &offer.layout
             && let [file] = files.as_slice()
             && let Ok(approval) = make_approval(&offer.layout, total)
             && approval.id != 0
         {
-            self.desktop.ui.file_drop.offer(
-                token,
-                file_drop::Offer {
-                    id: approval.id,
-                    file: file.clone(),
-                },
-                deadline.into_std(),
-            );
+            Some(file_drop::Offer {
+                id: approval.id,
+                file: file.clone(),
+            })
+        } else {
+            None
+        };
+        if let Some(drag) = drag {
+            if !native_offer.is_some_and(|offer| {
+                self.desktop
+                    .ui
+                    .file_drop
+                    .offer_drag(drag, token, offer, deadline.into_std())
+            }) {
+                self.desktop.end_incoming(token, Phase::Failed);
+                return self.tell(Control::Decision { id, accept: false });
+            }
+        } else if let Some(offer) = native_offer {
+            self.desktop
+                .ui
+                .file_drop
+                .offer(token, offer, deadline.into_std());
         }
         self.incoming = Some(Incoming {
             offer,
@@ -785,7 +871,9 @@ impl Link<'_> {
             native: false,
         });
         if file {
-            if let Some(paste) = &self.desktop.paste {
+            if drag.is_none()
+                && let Some(paste) = &self.desktop.paste
+            {
                 paste.arm(token, self.sequence, deadline.into_std());
             }
         } else if requires_approval {

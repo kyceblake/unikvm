@@ -18,12 +18,15 @@ pub struct Offer {
     pub file: FileOffer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Latest,
     Begin(u64),
     Poll(u64),
     Finish { id: u64, copied: bool },
+    Start { path: String, observed_ms: u64 },
+    ForDrag(u64),
+    Armed(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,10 +45,21 @@ pub async fn exchange(
     stream.write_all(REQUEST).await?;
     match command {
         Command::Latest => stream.write_u8(0).await?,
-        Command::Begin(id) | Command::Poll(id) | Command::Finish { id, .. } => {
+        Command::Start { path, observed_ms } => {
+            stream.write_u8(4).await?;
+            stream.write_u64(observed_ms).await?;
+            write_string(stream, &path, MAX_PATH_BYTES).await?;
+        }
+        Command::Begin(id)
+        | Command::Poll(id)
+        | Command::Finish { id, .. }
+        | Command::ForDrag(id)
+        | Command::Armed(id) => {
             let tag = match command {
                 Command::Begin(_) => 1,
                 Command::Poll(_) => 2,
+                Command::ForDrag(_) => 5,
+                Command::Armed(_) => 6,
                 _ => 3,
             };
             stream.write_u8(tag).await?;
@@ -89,6 +103,12 @@ impl Command {
                 id: read_id(stream).await?,
                 copied: read_flag(stream).await?,
             },
+            4 => Self::Start {
+                observed_ms: stream.read_u64().await?,
+                path: read_string(stream, MAX_PATH_BYTES).await?,
+            },
+            5 => Self::ForDrag(read_id(stream).await?),
+            6 => Self::Armed(read_id(stream).await?),
             _ => return Err(invalid()),
         })
     }
@@ -168,6 +188,14 @@ mod tests {
             ),
             (Command::Begin(42), Reply::Pending),
             (
+                Command::Start {
+                    path: "/tmp/sample.txt".into(),
+                    observed_ms: 42,
+                },
+                Reply::Recorded,
+            ),
+            (Command::Armed(42), Reply::Recorded),
+            (
                 Command::Poll(42),
                 Reply::Ready("C:\\staging\\sample.txt".into()),
             ),
@@ -182,7 +210,7 @@ mod tests {
         for (command, reply) in cases {
             let (mut client, server) = tokio::io::duplex(8);
             let (received, served) = tokio::join!(
-                exchange(&mut client, command),
+                exchange(&mut client, command.clone()),
                 local::respond_with_desktop(
                     server,
                     || panic!("status request"),

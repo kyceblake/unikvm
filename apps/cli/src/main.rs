@@ -1,5 +1,5 @@
 mod clipboard;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod file_drop;
 mod identity;
 
@@ -31,6 +31,8 @@ fn run() -> Result<()> {
         Some("drag-receive") => return file_drop::receive(args),
         #[cfg(not(target_os = "windows"))]
         Some("drag-receive") => bail!("the native drop preview requires Windows"),
+        #[cfg(target_os = "macos")]
+        Some("drag-source") => return file_drop::source(args),
         Some("tray") => {
             let agent_owned = match args.next().as_deref().and_then(|value| value.to_str()) {
                 None => false,

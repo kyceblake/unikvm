@@ -59,6 +59,8 @@ pub struct InputConfig {
     pub allow_locked_receive: bool,
     pub peer_fingerprint: String,
     pub peer_side: Option<PeerSide>,
+    #[serde(default)]
+    pub file_drag: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -144,6 +146,8 @@ pub enum ConfigError {
         "set clipboard.peer_fingerprint or clipboard.peer_fingerprints to distinct peers trusted in [network]"
     )]
     ClipboardPeer,
+    #[error("file drag requires an input edge and file sharing with the same pinned peer")]
+    FileDrag,
     #[error("input.peer_side requires bidirectional input mode")]
     InputLayout,
     #[error("input.allow_locked_receive requires receive or bidirectional input mode")]
@@ -262,6 +266,17 @@ impl Config {
         }) {
             return Err(ConfigError::ClipboardPeer);
         }
+        if let Some(input) = config.input.as_ref().filter(|input| input.file_drag)
+            && (input.peer_side.is_none()
+                || !config.clipboard.as_ref().is_some_and(|clipboard| {
+                    clipboard.files
+                        && clipboard
+                            .peers()
+                            .any(|peer| peer.eq_ignore_ascii_case(&input.peer_fingerprint))
+                }))
+        {
+            return Err(ConfigError::FileDrag);
+        }
         Ok(config)
     }
 }
@@ -343,6 +358,23 @@ mod tests {
             Config::parse(&format!("{base}{network}{receive}{edge}")),
             Err(ConfigError::InputLayout)
         ));
+        let drag = "\nfile_drag = true";
+        let files = "\n[clipboard]\npeer_fingerprint = 'AB'\nfiles = true";
+        assert!(matches!(
+            Config::parse(&format!("{base}{network}{input}{edge}{drag}")),
+            Err(ConfigError::FileDrag)
+        ));
+        assert!(matches!(
+            Config::parse(&format!("{base}{network}{input}{drag}{files}")),
+            Err(ConfigError::FileDrag)
+        ));
+        assert!(
+            Config::parse(&format!("{base}{network}{input}{edge}{drag}{files}"))
+                .unwrap()
+                .input
+                .unwrap()
+                .file_drag
+        );
     }
 
     #[test]

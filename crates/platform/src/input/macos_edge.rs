@@ -2,7 +2,6 @@ use std::io;
 
 use core_graphics::display::CGDisplay;
 use core_graphics::geometry::CGPoint;
-#[cfg(test)]
 use core_graphics::{
     event::CGEvent,
     event_source::{CGEventSource, CGEventSourceStateID},
@@ -34,7 +33,6 @@ pub(super) fn place(point: Point) -> io::Result<()> {
         .map_err(|status| io::Error::other(format!("could not place macOS cursor ({status})")))
 }
 
-#[cfg(test)]
 pub(super) fn position() -> io::Result<Point> {
     let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
         .map_err(|()| io::Error::other("could not read macOS cursor"))?;

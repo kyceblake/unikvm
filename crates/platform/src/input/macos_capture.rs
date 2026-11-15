@@ -28,7 +28,7 @@ use core_graphics::geometry::CGPoint;
 use core_graphics::sys::CGEventRef;
 use foreign_types::ForeignType;
 use tokio::sync::{mpsc, watch};
-use unikvm_core::geometry::Point;
+use unikvm_core::geometry::{Edge, Point};
 use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 use super::capture::{
@@ -481,6 +481,7 @@ impl TapState {
                 generation,
                 expires,
                 edge,
+                drag,
             } if self.stopped_generation != Some(generation) => {
                 let now = Instant::now();
                 if self.generation != Some(generation) {
@@ -492,6 +493,26 @@ impl TapState {
                     || (self.cursor.is_none() && now >= self.arm_until)
                 {
                     self.emergency();
+                } else if self.cursor.is_none()
+                    && let Some(epoch) = drag
+                {
+                    let side = self.edge.as_ref().map(|edge| edge.layout.side);
+                    if epoch != self.shortcuts.borrow().drag_epoch
+                        || side.and_then(drag_height).is_none()
+                    {
+                        self.emergency();
+                    } else if let Ok(cursor) = CapturedCursor::new() {
+                        self.cursor = Some(cursor);
+                        if cancel_native_drag().is_ok() {
+                            self.swallowed_buttons[0] = true;
+                            self.shortcuts
+                                .send_modify(|signal| signal.drag_generation = Some(generation));
+                        } else {
+                            self.emergency();
+                        }
+                    } else {
+                        self.emergency();
+                    }
                 } else if self.cursor.is_none() && !physical_input_held() {
                     match CapturedCursor::new() {
                         Ok(cursor) => self.cursor = Some(cursor),
@@ -562,6 +583,23 @@ impl TapState {
             self.local();
         }
         let kind = event.get_type();
+        if self.cursor.is_none()
+            && matches!(
+                kind,
+                KeyDown
+                    | KeyUp
+                    | FlagsChanged
+                    | LeftMouseDown
+                    | LeftMouseUp
+                    | RightMouseDown
+                    | RightMouseUp
+                    | OtherMouseDown
+                    | OtherMouseUp
+            )
+        {
+            self.shortcuts
+                .send_modify(|signal| signal.drag_epoch = signal.drag_epoch.wrapping_add(1));
+        }
         if !matches!(kind, ScrollWheel) || event.get_integer_value_field(MOMENTUM_PHASE) == 0 {
             self.idle_cursor.show();
         }
@@ -842,10 +880,53 @@ pub(crate) fn secure_input() -> bool {
 pub(super) fn physical_input_held() -> bool {
     let source = CGEventSourceStateID::HIDSystemState as i32;
     // SAFETY: Read current hardware state with valid Quartz virtual key and button numbers.
+    keys_held(source) || (0..5).any(|button| unsafe { CGEventSourceButtonState(source, button) })
+}
+
+fn keys_held(source: i32) -> bool {
+    // SAFETY: Quartz virtual key codes on this hardware state source are valid.
     (0..=127)
         .filter(|&key| key != KeyCode::CAPS_LOCK)
         .any(|key| unsafe { CGEventSourceKeyState(source, key) })
-        || (0..5).any(|button| unsafe { CGEventSourceButtonState(source, button) })
+}
+
+pub(super) fn drag_height(side: Edge) -> Option<u16> {
+    let source = CGEventSourceStateID::HIDSystemState as i32;
+    // SAFETY: These hardware button-state queries use Quartz button numbers.
+    let held = unsafe { CGEventSourceButtonState(source, 0) };
+    if !held
+        || (1..5).any(|button| unsafe { CGEventSourceButtonState(source, button) })
+        || keys_held(source)
+        || secure_input()
+        || super::macos_session::capture_unavailable()
+    {
+        return None;
+    }
+    let point = super::macos_edge::position().ok()?;
+    let dx = match side {
+        Edge::Left => -4,
+        Edge::Right => 4,
+        _ => return None,
+    };
+    super::EdgeLayout::primary(side)
+        .ok()?
+        .crossing(point, dx, 0)
+}
+
+fn cancel_native_drag() -> Result<(), ()> {
+    if !MacInputSink::has_permission() {
+        return Err(());
+    }
+    let source = CGEventSource::new(CGEventSourceStateID::Private)?;
+    let escape =
+        [true, false].map(|pressed| CGEvent::new_keyboard_event(source.clone(), 53, pressed));
+    let [down, up] = escape;
+    for event in [down?, up?] {
+        // The tagged Escape terminates Finder's local drag and bypasses the input tap.
+        event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, EVENT_TAG);
+        event.post(CGEventTapLocation::HID);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

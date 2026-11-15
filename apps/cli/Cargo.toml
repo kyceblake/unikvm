@@ -23,5 +23,9 @@ tokio.workspace = true
 unikvm-core.workspace = true
 unikvm-platform = { workspace = true, features = ["windows-file-drop"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+unikvm-core.workspace = true
+unikvm-platform = { workspace = true, features = ["macos-file-drag"] }
+
 [build-dependencies]
 embed-manifest.workspace = true

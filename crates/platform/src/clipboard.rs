@@ -12,7 +12,7 @@ mod paste;
 #[cfg(target_os = "windows")]
 mod windows;
 
-#[cfg(all(feature = "file-drag-probe", target_os = "macos"))]
+#[cfg(all(feature = "macos-file-drag", target_os = "macos"))]
 pub(crate) use macos::file_paths;
 #[cfg(target_os = "macos")]
 pub use macos::{Clipboard, open_source, staging_directory};

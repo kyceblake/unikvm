@@ -1,6 +1,7 @@
 //! Bounded records for an opt-in control stream. Each stream is one focus session.
 
 use std::io;
+use std::num::NonZeroU64;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -9,6 +10,8 @@ use unikvm_core::input::{ButtonState, InputEvent, KeyUsage, PointerButton};
 
 pub const REQUEST: &[u8; 8] = b"INPUT/1\n";
 pub const EDGE_REQUEST: &[u8; 8] = b"EDGE/1\r\n";
+pub const DRAG_REQUEST: &[u8; 8] = b"DRAG/1\r\n";
+pub const DRAG_PREPARE: u8 = 254;
 pub const GRANT: u8 = 1;
 pub const DENY: u8 = 0;
 pub const HEARTBEAT_ACK: u8 = 2;
@@ -35,6 +38,14 @@ pub fn edge_start(side: Edge, height: u16) -> [u8; 20] {
     let mut packet = [0; 20];
     packet[..11].copy_from_slice(&edge_packet(side, height));
     packet[11..].copy_from_slice(&encode(Frame::Heartbeat(0)));
+    packet
+}
+
+pub fn drag_start(side: Edge, height: u16, nonce: NonZeroU64) -> [u8; 19] {
+    let mut packet = [0; 19];
+    packet[..11].copy_from_slice(&edge_packet(side, height));
+    packet[..8].copy_from_slice(DRAG_REQUEST);
+    packet[11..].copy_from_slice(&nonce.get().to_be_bytes());
     packet
 }
 
@@ -216,6 +227,13 @@ fn edge_request_requires_an_opposite_horizontal_side_and_preserves_height() {
     assert_eq!(edge_entry([1, 0, 0]), Some((Edge::Left, 0)));
     assert_eq!(edge_entry([2, 0, 0]), None);
     assert_eq!(edge_return(0x1234), [EDGE_RETURN, 0x12, 0x34]);
+    let drag = drag_start(Edge::Right, 0x1234, NonZeroU64::new(83).unwrap());
+    assert_eq!(&drag[..8], DRAG_REQUEST);
+    assert_eq!(
+        edge_entry(drag[8..11].try_into().unwrap()),
+        Some((Edge::Left, 0x1234))
+    );
+    assert_eq!(u64::from_be_bytes(drag[11..].try_into().unwrap()), 83);
 }
 #[cfg(test)]
 #[tokio::test]

@@ -56,6 +56,8 @@ The optional file drag probe enables OLE drop targets and AppKit dragging in the
 
 The Windows drop helper reuses the locked Shell and OLE bindings from the probe. The CLI depends on the workspace's `unikvm-core` for the existing `Edge` type. [Windows Shell transfer APIs](https://learn.microsoft.com/en-us/windows/win32/shell/datascenarios)
 
+The Finder edge helper uses the already locked AppKit drag pasteboard and window APIs. The Mac input monitor uses its existing Quartz event bindings to end the local drag once the receiving desktop is armed. [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |

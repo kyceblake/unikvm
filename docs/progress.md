@@ -1,10 +1,16 @@
 # Progress
 
+## Finder-to-Explorer held-button handoff
+
+- Added the opt-in `input.file_drag` preview. Finder's edge helper supplies one file. The paired Windows agent opens the existing Explorer drop helper before granting pointer control, then allows a file request only after the forwarded button release. The receiver still approves the transfer and the selected folder receives verified bytes. [Desktop test instructions](platform-support.md#test-a-finder-drag-across-the-edge-into-explorer)
+- Added checks for file-sharing configuration, metadata-only drag offers, session and connection binding, and cancellation before release. Windows formatting, workspace Clippy, build, and 73 tests passed. The Windows native Shell drop test and Cargo deny passed. The Apple Silicon workspace passed strict Clippy as a compile-time check.
+- Next, run the paired Mac-to-Windows desktop test to verify the native handoff, cancellation, and ordinary input afterward. The reverse direction still needs native Finder delivery.
+
 ## Explorer delivery of a paired file offer
 
 - Connected the Windows native Shell drop to the existing approval, progress, and verified file transfer. The `drag-receive` preview uses a pending single-file offer. Releasing over Explorer requests it, and the receiving clipboard keeps its existing contents. The peer clipboard protocol stays at v6. [Preview instructions](platform-support.md#test-explorer-with-a-paired-file-offer)
 - Windows workspace formatting, strict Clippy, tests, and build passed. The native Shell test confirmed that the destination requests the verified file only after release and copies identical bytes. The new IPC command passed an isolated same-user named-pipe test. The Apple Silicon platform check passed at compile time. Cargo deny passed.
-- Next, verify the preview with the Windows agent and a paired Mac, then wire the held-button edge handoff to the destination helper. Finder delivery still requires AppKit file promises.
+- The user confirmed the live Mac-to-Windows Explorer drop with the updated Windows agent and a paired Mac.
 
 ## Deferred Windows drop probe
 

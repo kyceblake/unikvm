@@ -177,7 +177,7 @@ pub(crate) fn run_probe(edge: Edge, source: Option<Source<'_>>) -> io::Result<()
         Some(Source::Deferred(path)) => Some(deferred::file_object(path, released.clone())?),
         None => None,
     };
-    let copied = run_edge(edge, object, released)?;
+    let copied = run_edge(edge, object, released, || Ok(()))?;
     if let Some(copied) = copied {
         drag_probe::report_drop(copied);
     }
@@ -190,17 +190,19 @@ pub fn run_received(
     name: &str,
     size: u64,
     verified_path: impl Fn() -> io::Result<PathBuf> + Send + Sync + 'static,
+    ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<bool> {
     let _ole = Apartment::new()?;
     let released = Arc::new(AtomicBool::new(false));
     let object = deferred::received_object(name, size, released.clone(), verified_path)?;
-    run_edge(edge, Some(object), released).map(|copied| copied.unwrap_or(false))
+    run_edge(edge, Some(object), released, ready).map(|copied| copied.unwrap_or(false))
 }
 
 fn run_edge(
     edge: Edge,
     object: Option<IDataObject>,
     released: Arc<AtomicBool>,
+    ready: impl FnOnce() -> io::Result<()>,
 ) -> io::Result<Option<bool>> {
     // SAFETY: This thread owns the window, registration and message queue.
     unsafe {
@@ -259,6 +261,7 @@ fn run_edge(
             );
         }
         ShowWindow(window.0, SW_SHOWNOACTIVATE);
+        ready()?;
         let mut event = MSG::default();
         loop {
             match GetMessageW(&mut event, null_mut(), 0, 0) {
