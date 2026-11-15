@@ -39,8 +39,40 @@ pub(super) fn position() -> io::Result<Point> {
     let point = CGEvent::new(source)
         .map_err(|()| io::Error::other("could not read macOS cursor"))?
         .location();
-    Ok(Point {
-        x: point.x.round() as i32,
-        y: point.y.round() as i32,
-    })
+    Ok(pixel_position(point))
+}
+
+fn pixel_position(point: CGPoint) -> Point {
+    Point {
+        // Preserve the containing pixel at fractional right/bottom edges.
+        x: point.x.floor() as i32,
+        y: point.y.floor() as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unikvm_core::geometry::Edge;
+
+    #[test]
+    fn fractional_last_pixel_still_crosses_the_display_edge() {
+        let display = DisplayRect::new(
+            Point { x: 0, y: 0 },
+            1280.try_into().unwrap(),
+            832.try_into().unwrap(),
+        )
+        .unwrap();
+        let point = pixel_position(CGPoint::new(1279.75, 831.75));
+        assert_eq!(
+            display.horizontal_crossing(Edge::Right, point, 4, 0),
+            Some(u16::MAX)
+        );
+        let outside = pixel_position(CGPoint::new(1280.0, 400.0));
+        assert!(!display.contains(outside));
+        assert_eq!(
+            pixel_position(CGPoint::new(-0.25, -0.25)),
+            Point { x: -1, y: -1 }
+        );
+    }
 }
