@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use tokio::time::timeout;
 use unikvm_protocol::local::{
-    ClipboardPhase, ClipboardStatus, Status, query, query_clipboard, respond,
-    respond_with_clipboard,
+    ClipboardPhase, ClipboardStatus, Status, file_drop, query, query_clipboard, respond,
+    respond_with_clipboard, respond_with_desktop,
 };
+use unikvm_protocol::tray;
 
 use super::Endpoint;
 
@@ -82,6 +83,34 @@ async fn native_status_transport_retains_endpoint_and_recovers_after_abandoned_c
             }
         );
         assert_eq!(received?, clipboard);
+        served?;
+        let (received, served) = tokio::join!(
+            async {
+                let mut client = endpoint.connect().await?;
+                file_drop::exchange(&mut client, file_drop::Command::Poll(42)).await
+            },
+            async {
+                let stream = listener.accept().await?;
+                respond_with_desktop(
+                    stream,
+                    || expected,
+                    || clipboard,
+                    |_| None,
+                    |_| false,
+                    tray::View::default,
+                    (
+                        |_| false,
+                        |command| {
+                            assert_eq!(command, file_drop::Command::Poll(42));
+                            file_drop::Reply::Pending
+                        },
+                    ),
+                )
+                .await?;
+                listener.finish()
+            }
+        );
+        assert_eq!(received?, file_drop::Reply::Pending);
         served?;
         Ok::<_, io::Error>(())
     })

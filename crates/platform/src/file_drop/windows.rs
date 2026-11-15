@@ -2,7 +2,7 @@
 
 use std::{
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     ptr::{null, null_mut},
     sync::{
         Arc,
@@ -10,32 +10,26 @@ use std::{
     },
 };
 
-use super::Source;
 mod deferred;
 
 use unikvm_core::geometry::Edge;
 use windows::Win32::{
-    Foundation::{
-        DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND as OleWindow,
-        POINTL, S_OK,
-    },
+    Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
     System::{
-        Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL},
+        Com::IDataObject,
         Ole::{
             DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource,
-            IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize,
-            RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+            IDropSource_Impl, OleInitialize, OleUninitialize,
         },
         SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
     },
-    UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
 };
-use windows::core::{BOOL, HRESULT, HSTRING, Ref, Result, implement};
+use windows::core::{BOOL, HRESULT, implement};
 use windows_sys::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
         Graphics::Gdi::{COLOR_HIGHLIGHT, GetSysColorBrush},
-        System::{LibraryLoader::GetModuleHandleW, Ole::CF_HDROP},
+        System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
             GetSystemMetrics, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
@@ -46,9 +40,32 @@ use windows_sys::{
     core::w,
 };
 
+#[cfg(feature = "file-drag-probe")]
+use {
+    crate::drag_probe::{self, Source},
+    std::path::Path,
+    windows::{
+        Win32::{
+            Foundation::{HWND as OleWindow, POINTL},
+            System::{
+                Com::{DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL},
+                Ole::{
+                    IDropTarget, IDropTarget_Impl, RegisterDragDrop, ReleaseStgMedium,
+                    RevokeDragDrop,
+                },
+            },
+            UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
+        },
+        core::{HSTRING, Ref, Result},
+    },
+    windows_sys::Win32::System::Ole::CF_HDROP,
+};
+
+#[cfg(feature = "file-drag-probe")]
 #[implement(IDropTarget)]
 struct EdgeTarget;
 
+#[cfg(feature = "file-drag-probe")]
 #[allow(non_snake_case)]
 impl IDropTarget_Impl for EdgeTarget_Impl {
     fn DragEnter(
@@ -59,7 +76,7 @@ impl IDropTarget_Impl for EdgeTarget_Impl {
         effect: *mut DROPEFFECT,
     ) -> Result<()> {
         reject(effect);
-        super::report(object.as_ref().and_then(references));
+        drag_probe::report(object.as_ref().and_then(references));
         Ok(())
     }
 
@@ -89,6 +106,7 @@ impl IDropTarget_Impl for EdgeTarget_Impl {
     }
 }
 
+#[cfg(feature = "file-drag-probe")]
 fn reject(effect: *mut DROPEFFECT) {
     // SAFETY: OLE provides a writable effect pointer for the callback.
     if let Some(effect) = unsafe { effect.as_mut() } {
@@ -96,6 +114,7 @@ fn reject(effect: *mut DROPEFFECT) {
     }
 }
 
+#[cfg(feature = "file-drag-probe")]
 fn references(object: &IDataObject) -> Option<Vec<PathBuf>> {
     let format = FORMATETC {
         cfFormat: CF_HDROP,
@@ -140,6 +159,7 @@ impl IDropSource_Impl for FileSource_Impl {
     }
 }
 
+#[cfg(feature = "file-drag-probe")]
 fn file_object(path: &Path, _ole: &Apartment) -> Result<IDataObject> {
     // SAFETY: The caller keeps the OLE apartment alive while using this object.
     unsafe {
@@ -148,7 +168,8 @@ fn file_object(path: &Path, _ole: &Apartment) -> Result<IDataObject> {
     }
 }
 
-pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
+#[cfg(feature = "file-drag-probe")]
+pub(crate) fn run_probe(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
     let ole = Apartment::new()?;
     let released = Arc::new(AtomicBool::new(false));
     let object = match source {
@@ -156,6 +177,31 @@ pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
         Some(Source::Deferred(path)) => Some(deferred::file_object(path, released.clone())?),
         None => None,
     };
+    let copied = run_edge(edge, object, released)?;
+    if let Some(copied) = copied {
+        drag_probe::report_drop(copied);
+    }
+    Ok(())
+}
+
+/// Advertise the remote file until a native target requests its verified local copy.
+pub fn run_received(
+    edge: Edge,
+    name: &str,
+    size: u64,
+    verified_path: impl Fn() -> io::Result<PathBuf> + Send + Sync + 'static,
+) -> io::Result<bool> {
+    let _ole = Apartment::new()?;
+    let released = Arc::new(AtomicBool::new(false));
+    let object = deferred::received_object(name, size, released.clone(), verified_path)?;
+    run_edge(edge, Some(object), released).map(|copied| copied.unwrap_or(false))
+}
+
+fn run_edge(
+    edge: Edge,
+    object: Option<IDataObject>,
+    released: Arc<AtomicBool>,
+) -> io::Result<Option<bool>> {
     // SAFETY: This thread owns the window, registration and message queue.
     unsafe {
         let width = 18;
@@ -165,7 +211,7 @@ pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
             _ => return Err(io::Error::other("choose a horizontal edge")),
         };
         let application = GetModuleHandleW(null());
-        let name = w!("UniKVMFileDragProbe");
+        let name = w!("UniKVMFileDrag");
         if RegisterClassW(&WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: application,
@@ -194,6 +240,7 @@ pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         let window = Window(hwnd);
+        #[cfg(feature = "file-drag-probe")]
         let _registration = if object.is_none() {
             let target: IDropTarget = EdgeTarget.into();
             RegisterDragDrop(OleWindow(window.0), &target).map_err(io::Error::other)?;
@@ -216,16 +263,15 @@ pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
         loop {
             match GetMessageW(&mut event, null_mut(), 0, 0) {
                 -1 => return Err(io::Error::last_os_error()),
-                0 => return Ok(()),
-                _ if event.hwnd == window.0 && event.message == WM_TIMER => return Ok(()),
+                0 => return Ok(None),
+                _ if event.hwnd == window.0 && event.message == WM_TIMER => return Ok(None),
                 _ if event.hwnd == window.0 && event.message == WM_LBUTTONDOWN => {
                     if let Some(object) = &object {
                         let source: IDropSource = FileSource(released).into();
                         let mut effect = DROPEFFECT_NONE;
                         let result = DoDragDrop(object, &source, DROPEFFECT_COPY, &mut effect);
                         result.ok().map_err(io::Error::other)?;
-                        super::report_drop(result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY);
-                        return Ok(());
+                        return Ok(Some(result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY));
                     }
                 }
                 _ => {
@@ -280,8 +326,10 @@ impl Drop for Window {
     }
 }
 
+#[cfg(feature = "file-drag-probe")]
 struct Registration(HWND);
 
+#[cfg(feature = "file-drag-probe")]
 impl Drop for Registration {
     fn drop(&mut self) {
         // SAFETY: Revoke the registered drop target before destroying the window.
@@ -289,7 +337,7 @@ impl Drop for Registration {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "file-drag-probe"))]
 mod tests {
     use super::*;
 

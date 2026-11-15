@@ -21,7 +21,7 @@ use unikvm_platform::clipboard::{
 };
 use unikvm_protocol::clipboard::{self, Control, DATA, Layout, Offer, READY};
 use unikvm_protocol::local::{
-    Approval, ApprovalDecision, ClipboardPhase as Phase, ClipboardStatus, Progress,
+    Approval, ApprovalDecision, ClipboardPhase as Phase, ClipboardStatus, Progress, file_drop,
 };
 use unikvm_protocol::tray::{Phase as UiPhase, Transfer};
 use unikvm_transfer::{self as transfer, Prepared, Received};
@@ -378,6 +378,7 @@ impl Desktop {
     }
 
     fn end_incoming(&self, token: u64, phase: Phase) {
+        self.ui.file_drop.clear(token);
         if self.incoming.get() == Some(token) {
             self.incoming.set(None);
             if let Some(paste) = &self.paste {
@@ -480,6 +481,7 @@ struct Incoming {
     prompt: Option<Prompt>,
     ready: Option<Received>,
     transfer: Option<u64>,
+    native: bool,
 }
 
 struct Link<'a> {
@@ -567,18 +569,7 @@ impl Link<'_> {
                     if self.incoming.as_ref().is_some_and(|item| item.deadline <= now) {
                         self.finish_incoming(Phase::Failed, true)?;
                     }
-                    if let Some(incoming) = self.incoming.as_ref()
-                        && incoming.offer.layout.is_file()
-                        && incoming.prompt.is_none()
-                        && !incoming.accepted
-                        && self.desktop.paste_requested(incoming.token)
-                    {
-                        if self.os.sequence()? == incoming.sequence {
-                            self.show_prompt()?;
-                        } else {
-                            self.finish_incoming(Phase::Failed, true)?;
-                        }
-                    }
+                    self.poll_file_request()?;
                     if self.out.as_ref().is_some_and(|item| item.deadline <= now) {
                         self.withdraw(Phase::Failed)?;
                     }
@@ -595,6 +586,33 @@ impl Link<'_> {
         self.desktop.incoming.get() == Some(item.token)
     }
 
+    fn poll_file_request(&mut self) -> Result<()> {
+        let Some(incoming) = self.incoming.as_mut() else {
+            return Ok(());
+        };
+        let native = &self.desktop.ui.file_drop;
+        if !incoming.offer.layout.is_file() || incoming.prompt.is_some() || incoming.accepted {
+            return Ok(());
+        }
+        if native.claim(incoming.token) {
+            if let Some(paste) = &self.desktop.paste
+                && paste.clear_unrequested(incoming.token)
+            {
+                incoming.native = true;
+            } else {
+                native.clear(incoming.token);
+            }
+        }
+        if incoming.native || self.desktop.paste_requested(incoming.token) {
+            if self.os.sequence()? == incoming.sequence {
+                self.show_prompt()?;
+            } else {
+                self.finish_incoming(Phase::Failed, true)?;
+            }
+        }
+        Ok(())
+    }
+
     fn outgoing_phase(&self, phase: Phase) {
         self.desktop
             .update_peer(self.index, |status| status.phase = phase);
@@ -604,7 +622,7 @@ impl Link<'_> {
         if let Some(id) = id {
             self.desktop.ui.update_transfer(direction, id, |item| {
                 item.phase = phase;
-                if phase == UiPhase::Ready {
+                if matches!(phase, UiPhase::Ready | UiPhase::Dropped) {
                     item.bytes = item.total;
                 }
             });
@@ -740,6 +758,21 @@ impl Link<'_> {
             return self.tell(Control::Decision { id, accept: false });
         };
         let deadline = Instant::now() + if file { FILE_OFFER } else { APPROVAL };
+        if cfg!(windows)
+            && let Layout::Files(files) = &offer.layout
+            && let [file] = files.as_slice()
+            && let Ok(approval) = make_approval(&offer.layout, total)
+            && approval.id != 0
+        {
+            self.desktop.ui.file_drop.offer(
+                token,
+                file_drop::Offer {
+                    id: approval.id,
+                    file: file.clone(),
+                },
+                deadline.into_std(),
+            );
+        }
         self.incoming = Some(Incoming {
             offer,
             token,
@@ -749,6 +782,7 @@ impl Link<'_> {
             ready: None,
             prompt: None,
             transfer: None,
+            native: false,
         });
         if file {
             if let Some(paste) = &self.desktop.paste {
@@ -766,6 +800,9 @@ impl Link<'_> {
         let Some(incoming) = self.incoming.as_mut() else {
             return Ok(());
         };
+        if !incoming.native {
+            self.desktop.ui.file_drop.clear(incoming.token);
+        }
         let approval = make_approval(&incoming.offer.layout, incoming.offer.layout.total()?)?;
         let approval_id = approval.id;
         self.desktop.approval.send_replace(Some(approval));
@@ -879,6 +916,15 @@ impl Link<'_> {
     }
 
     fn read_clipboard(&mut self) -> Result<()> {
+        if let Some(incoming) = self.incoming.as_ref()
+            && let Some(copied) = self.desktop.ui.file_drop.finished(incoming.token)
+        {
+            // Explorer has already copied the file. Record it before processing a newer copy.
+            if copied {
+                self.revisions.accept_remote(incoming.offer.revision);
+            }
+            self.finish_incoming(if copied { Phase::Ready } else { Phase::Failed }, true)?;
+        }
         if !self.os.available() {
             if self.available {
                 self.available = false;
@@ -964,6 +1010,20 @@ impl Link<'_> {
         {
             return self.finish_incoming(Phase::Failed, true);
         }
+        if incoming.native {
+            let Content::Files(paths) = &data.content else {
+                return self.finish_incoming(Phase::Failed, true);
+            };
+            if let [path] = paths.as_slice()
+                && let Some(path) = path
+                    .to_str()
+                    .filter(|path| path.len() <= file_drop::MAX_PATH_BYTES)
+                && self.desktop.ui.file_drop.ready(incoming.token, path)
+            {
+                return Ok(());
+            }
+            return self.finish_incoming(Phase::Failed, true);
+        }
         match self.os.write(incoming.sequence, &data.content) {
             Ok(WriteOutcome::Applied(sequence)) => {
                 self.sequence = sequence;
@@ -991,7 +1051,9 @@ impl Link<'_> {
             self.finish_ui(
                 1,
                 item.transfer,
-                if phase == Phase::Ready {
+                if phase == Phase::Ready && item.native {
+                    UiPhase::Dropped
+                } else if phase == Phase::Ready {
                     UiPhase::Ready
                 } else {
                     UiPhase::Failed

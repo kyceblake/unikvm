@@ -6,10 +6,15 @@ use unikvm_network::identity::Fingerprint;
 use unikvm_protocol::tray::Transfer;
 use unikvm_protocol::tray::{Connection, Peer, Phase, View};
 
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod file_drop;
+
 #[derive(Clone)]
 pub struct Desktop {
     pub view: watch::Sender<View>,
     pub cancels: broadcast::Sender<u64>,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    pub file_drop: file_drop::NativeDrops,
 }
 
 impl Desktop {
@@ -34,6 +39,8 @@ impl Desktop {
             Self {
                 view: watch::channel(view).0,
                 cancels: broadcast::channel(4).0,
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                file_drop: file_drop::NativeDrops::default(),
             },
             pins,
         ))

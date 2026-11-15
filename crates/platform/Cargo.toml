@@ -9,7 +9,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-file-drag-probe = [
+windows-file-drop = [
     "dep:windows",
     "dep:windows-core",
     "windows/Win32_Graphics_Gdi",
@@ -17,6 +17,9 @@ file-drag-probe = [
     "windows/Win32_System_Com_StructuredStorage",
     "windows/Win32_System_Memory",
     "windows/Win32_System_SystemServices",
+]
+file-drag-probe = [
+    "windows-file-drop",
     "objc2-app-kit/NSApplication",
     "objc2-app-kit/NSColor",
     "objc2-app-kit/NSDragging",

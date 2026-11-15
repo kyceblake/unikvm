@@ -102,6 +102,7 @@ fn clipboard_status(view: &View, direction: usize) -> Option<String> {
             ),
             Phase::Ready if sending => format!("Ready to paste on {}", item.peer),
             Phase::Ready => "Ready to paste here".to_owned(),
+            Phase::Dropped => "File dropped".to_owned(),
             Phase::Cancelled => "Transfer cancelled".to_owned(),
             Phase::Failed => "Transfer failed".to_owned(),
         })

@@ -12,7 +12,7 @@ use unikvm_config::Config;
 use unikvm_network::{PeerEndpoint, PeerEvent, identity::Fingerprint};
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
 use unikvm_protocol::local::{
-    Approval, ApprovalDecision, ClipboardStatus, Status, respond_with_tray,
+    Approval, ApprovalDecision, ClipboardStatus, Status, file_drop, respond_with_desktop,
 };
 use unikvm_protocol::tray::{Command, Connection};
 
@@ -288,7 +288,7 @@ async fn serve(
             result = listener.accept() => result.context("accept local connection")?,
         };
         let exit = Cell::new(false);
-        let exchange = respond_with_tray(
+        let exchange = respond_with_desktop(
             stream,
             || Status {
                 pid,
@@ -321,7 +321,17 @@ async fn serve(
                 view.clipboard = [clipboard.outgoing, clipboard.incoming];
                 view
             },
-            |command| local.command(command, &exit),
+            (
+                |command| local.command(command, &exit),
+                |drop_command| {
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                    if *local.requested.borrow() == Requested::Online {
+                        return local.desktop.file_drop.command(drop_command);
+                    }
+                    let _ = drop_command;
+                    file_drop::Reply::Unavailable
+                },
+            ),
         );
         tokio::select! {
             signal = &mut shutdown => { signal?; break; }

@@ -323,6 +323,7 @@ impl Panel {
                 (_, Phase::Copying) => format!("Receiving from {}", item.peer),
                 (0, Phase::Ready) => format!("Ready to paste on {}", item.peer),
                 (_, Phase::Ready) => "Ready to paste here".to_owned(),
+                (_, Phase::Dropped) => "File dropped".to_owned(),
                 (_, Phase::Failed) => "Transfer failed".to_owned(),
                 (_, Phase::Cancelled) => "Transfer cancelled".to_owned(),
             };
@@ -339,11 +340,12 @@ impl Panel {
             size(item.total)
         )));
         self.bar.setMaxValue(item.total.max(1) as f64);
-        self.bar.setDoubleValue(if item.phase == Phase::Ready {
-            item.total.max(1)
-        } else {
-            item.bytes
-        } as f64);
+        self.bar
+            .setDoubleValue(if matches!(item.phase, Phase::Ready | Phase::Dropped) {
+                item.total.max(1)
+            } else {
+                item.bytes
+            } as f64);
         if !self.window.isVisible() {
             if let Some(screen) = NSScreen::mainScreen(self.window.mtm()) {
                 let space = screen.visibleFrame();

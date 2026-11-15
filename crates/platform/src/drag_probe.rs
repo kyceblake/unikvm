@@ -2,13 +2,13 @@
 
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
 
 #[cfg(target_os = "macos")]
 pub use macos::run;
 #[cfg(target_os = "windows")]
-pub use windows::run;
+pub fn run(edge: unikvm_core::geometry::Edge, source: Option<Source<'_>>) -> std::io::Result<()> {
+    crate::file_drop::run_probe(edge, source)
+}
 
 use std::path::{Path, PathBuf};
 
@@ -18,7 +18,7 @@ pub enum Source<'a> {
     Deferred(&'a Path),
 }
 
-fn report(paths: Option<Vec<PathBuf>>) {
+pub(crate) fn report(paths: Option<Vec<PathBuf>>) {
     match paths {
         Some(paths) => println!(
             "Native drag exposed {} file reference(s) before release.",
@@ -28,7 +28,7 @@ fn report(paths: Option<Vec<PathBuf>>) {
     }
 }
 
-fn report_drop(copied: bool) {
+pub(crate) fn report_drop(copied: bool) {
     if copied {
         println!("Native drop target accepted a file copy.");
     } else {

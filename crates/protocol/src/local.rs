@@ -5,6 +5,8 @@ use std::io;
 use crate::tray;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+pub mod file_drop;
+
 const REQUEST: &[u8] = b"UNIKVM/1 STATUS\n";
 const CLIPBOARD: &[u8] = b"UNIKVM/2 CLIPBD\n";
 const LEGACY_CLIPBOARD: &[u8] = b"UNIKVM/1 CLIPBD\n";
@@ -250,13 +252,37 @@ pub async fn tray_command(
 }
 
 pub async fn respond_with_tray(
-    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin,
     status: impl FnOnce() -> Status,
     clipboard: impl FnOnce() -> ClipboardStatus,
     offer: impl FnOnce(u64) -> Option<Approval>,
     decide: impl FnOnce(ApprovalDecision) -> bool,
     tray_view: impl FnOnce() -> tray::View,
     tray_command: impl FnOnce(tray::Command) -> bool,
+) -> io::Result<()> {
+    respond_with_desktop(
+        stream,
+        status,
+        clipboard,
+        offer,
+        decide,
+        tray_view,
+        (tray_command, |_| file_drop::Reply::Unavailable),
+    )
+    .await
+}
+
+pub async fn respond_with_desktop(
+    mut stream: impl AsyncRead + AsyncWrite + Unpin,
+    status: impl FnOnce() -> Status,
+    clipboard: impl FnOnce() -> ClipboardStatus,
+    offer: impl FnOnce(u64) -> Option<Approval>,
+    decide: impl FnOnce(ApprovalDecision) -> bool,
+    tray_view: impl FnOnce() -> tray::View,
+    (tray_command, file_drop): (
+        impl FnOnce(tray::Command) -> bool,
+        impl FnOnce(file_drop::Command) -> file_drop::Reply,
+    ),
 ) -> io::Result<()> {
     let mut request = [0; REQUEST.len()];
     stream.read_exact(&mut request).await?;
@@ -320,6 +346,11 @@ pub async fn respond_with_tray(
             let command = tray::Command::read(&mut stream).await?;
             stream.write_all(HEADER).await?;
             stream.write_u8(u8::from(tray_command(command))).await?;
+        }
+        file_drop::REQUEST => {
+            let command = file_drop::Command::read(&mut stream).await?;
+            stream.write_all(HEADER).await?;
+            file_drop(command).write(&mut stream).await?;
         }
         _ => {
             return Err(io::Error::new(

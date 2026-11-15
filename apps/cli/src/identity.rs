@@ -11,6 +11,7 @@ pub(super) const USAGE: &str = "Usage:
   unikvm status
   unikvm tray
   unikvm clipboard
+  unikvm drag-receive [--left | --right] (Windows preview)
   unikvm identity init PATH
   unikvm identity fingerprint PATH
   unikvm identity export PATH CERTIFICATE

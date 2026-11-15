@@ -64,6 +64,18 @@ cargo test --locked -p unikvm-platform --features file-drag-probe shell_folder_c
 
 The second command exercises the native Shell folder drop handler directly and verifies the destination bytes. The first checks the full pointer gesture. Deferred drops on macOS require an AppKit file promise probe.
 
+### Test Explorer with a paired file offer
+
+Use the updated Windows agent and CLI in the same desktop session. Keep file sharing enabled for the paired sender. Copy one regular file on the sender, then open an empty Explorer folder on Windows. Run the command from the Windows workspace.
+
+```powershell
+cargo run --locked -p unikvm-cli -- drag-receive --left
+```
+
+Press and hold on the highlighted edge, move into the Explorer folder, and release. Windows should show the existing **Download / Decline** prompt only after release. Choose **Download** and compare the destination file's SHA-256 with the source. Test **Decline** and Escape with fresh offers and empty folders. The receiving clipboard should keep its existing contents. The Windows tray reports **File dropped** after Explorer reports a successful copy.
+
+This preview begins with a clipboard offer from a paired peer. The command starts the native drag on Windows. Automatic handoff of a file already being dragged on the sending desktop and native drops into Finder remain to be implemented.
+
 ## Run the Windows probe
 
 Run these from an interactive desktop with a harmless foreground window. The probe sends a paired F24 press/release and a one-unit relative pointer move, checks tagged hook delivery and suppression, and restores the starting pointer position. It collects counts without recording key identities.

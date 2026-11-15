@@ -54,6 +54,8 @@ The tray uses the existing AppKit bindings for the status item and transfer pane
 
 The optional file drag probe enables OLE drop targets and AppKit dragging in the existing platform bindings. It declares the already locked `windows-core` 0.62.2 (Rust 1.82, MIT OR Apache-2.0) directly because the OLE implementation macro references it. [Windows Core manifest](https://docs.rs/crate/windows-core/0.62.2/source/Cargo.toml)
 
+The Windows drop helper reuses the locked Shell and OLE bindings from the probe. The CLI depends on the workspace's `unikvm-core` for the existing `Edge` type. [Windows Shell transfer APIs](https://learn.microsoft.com/en-us/windows/win32/shell/datascenarios)
+
 ## Reviewed for later milestones
 
 | Crate | Stable release | Declared MSRV | License | Published | Decision |

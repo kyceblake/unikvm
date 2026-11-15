@@ -3,8 +3,7 @@
 use std::{
     io,
     mem::ManuallyDrop,
-    os::windows::ffi::OsStrExt,
-    path::Path,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -35,24 +34,61 @@ use windows::{
 };
 use windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW;
 
-pub(super) fn file_object(path: &Path, released: Arc<AtomicBool>) -> io::Result<IDataObject> {
+#[cfg(feature = "file-drag-probe")]
+pub(super) fn file_object(
+    path: &std::path::Path,
+    released: Arc<AtomicBool>,
+) -> io::Result<IDataObject> {
     Ok(VirtualFile::new(path, released)?.into())
+}
+
+pub(super) fn received_object(
+    name: &str,
+    size: u64,
+    released: Arc<AtomicBool>,
+    verified_path: impl Fn() -> io::Result<PathBuf> + Send + Sync + 'static,
+) -> io::Result<IDataObject> {
+    Ok(
+        VirtualFile::with_source(name.encode_utf16(), size, released, Box::new(verified_path))?
+            .into(),
+    )
 }
 
 #[implement(IDataObject)]
 struct VirtualFile {
-    path: HSTRING,
+    path: Box<dyn Fn() -> io::Result<PathBuf> + Send + Sync>,
     descriptor: FILEGROUPDESCRIPTORW,
     formats: [FORMATETC; 3],
     released: Arc<AtomicBool>,
 }
 
 impl VirtualFile {
-    fn new(path: &Path, released: Arc<AtomicBool>) -> io::Result<Self> {
+    #[cfg(feature = "file-drag-probe")]
+    fn new(path: &std::path::Path, released: Arc<AtomicBool>) -> io::Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
         let size = path.metadata()?.len();
         let name = path.file_name().ok_or(io::ErrorKind::InvalidInput)?;
+        let filename = name.encode_wide();
+        let path = path.to_owned();
+        Self::with_source(
+            filename,
+            size,
+            released,
+            Box::new(move || {
+                println!("Native target opened the file stream after release.");
+                Ok(path.clone())
+            }),
+        )
+    }
+
+    fn with_source(
+        name: impl Iterator<Item = u16>,
+        size: u64,
+        released: Arc<AtomicBool>,
+        path: Box<dyn Fn() -> io::Result<PathBuf> + Send + Sync>,
+    ) -> io::Result<Self> {
         let mut filename = [0; 260];
-        for (index, unit) in name.encode_wide().enumerate() {
+        for (index, unit) in name.enumerate() {
             if index >= filename.len() - 1 {
                 return Err(io::Error::other(
                     "file name exceeds the Shell descriptor limit",
@@ -61,7 +97,7 @@ impl VirtualFile {
             filename[index] = unit;
         }
         Ok(Self {
-            path: HSTRING::from(path.as_os_str()),
+            path,
             descriptor: FILEGROUPDESCRIPTORW {
                 cItems: 1,
                 fgd: [FILEDESCRIPTORW {
@@ -118,17 +154,12 @@ impl IDataObject_Impl for VirtualFile_Impl {
         if !self.released.load(Ordering::Acquire) {
             return Err(Error::from_hresult(STG_E_ACCESSDENIED));
         }
+        let path = (self.path)().map_err(|_| Error::from_hresult(STG_E_ACCESSDENIED))?;
+        let path = HSTRING::from(path.as_os_str());
         // SAFETY: The path stays valid during the call. The stream opens an existing file for reading.
         let stream = unsafe {
-            SHCreateStreamOnFileEx(
-                &self.path,
-                (STGM_READ | STGM_SHARE_DENY_WRITE).0,
-                0,
-                false,
-                None,
-            )?
+            SHCreateStreamOnFileEx(&path, (STGM_READ | STGM_SHARE_DENY_WRITE).0, 0, false, None)?
         };
-        println!("Native target opened the file stream after release.");
         // ReleaseStgMedium owns the stream reference starting at return.
         Ok(STGMEDIUM {
             tymed: TYMED_ISTREAM.0 as u32,
@@ -233,10 +264,10 @@ fn global_medium<T: Copy>(value: T) -> Result<STGMEDIUM> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "file-drag-probe"))]
 mod tests {
+    use super::super::{Apartment, FileSource};
     use super::*;
-    use crate::drag_probe::windows::{Apartment, FileSource};
     use windows::Win32::{
         Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, POINTL},
         System::{
@@ -323,13 +354,22 @@ mod tests {
         let _ole = Apartment::new().unwrap();
         let sample = tempfile::tempdir().unwrap();
         let name = "virtual-drop-sample.txt";
-        let path = sample.path().join(name);
+        let path = sample.path().join("verified-source.txt");
         let bytes = b"delivered through the Shell folder drop handler";
         std::fs::write(&path, bytes).unwrap();
         let destination = sample.path().join("destination");
         std::fs::create_dir(&destination).unwrap();
         let released = Arc::new(AtomicBool::new(false));
-        let data = file_object(&path, released.clone()).unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let data = received_object(name, bytes.len() as u64, released.clone(), {
+            let requests = requests.clone();
+            let path = path.clone();
+            move || {
+                requests.fetch_add(1, Ordering::Relaxed);
+                Ok(path.clone())
+            }
+        })
+        .unwrap();
         let source: IDropSource = FileSource(released).into();
 
         // SAFETY: The test owns both locations and the Shell interfaces remain in this apartment.
@@ -343,6 +383,7 @@ mod tests {
                 .DragEnter(&data, MK_LBUTTON, point, &mut effect)
                 .unwrap();
             assert_eq!(effect, DROPEFFECT_COPY);
+            assert_eq!(requests.load(Ordering::Relaxed), 0);
             assert!(!destination.join(name).exists());
             assert_eq!(
                 source.QueryContinueDrag(false, MODIFIERKEYS_FLAGS(0)),
@@ -352,6 +393,7 @@ mod tests {
                 .Drop(&data, MODIFIERKEYS_FLAGS(0), point, &mut effect)
                 .unwrap();
         }
+        assert!(requests.load(Ordering::Relaxed) > 0);
         assert_eq!(std::fs::read(destination.join(name)).unwrap(), bytes);
         assert_eq!(std::fs::read(path).unwrap(), bytes);
     }

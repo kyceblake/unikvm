@@ -19,5 +19,9 @@ unikvm-platform = { workspace = true, features = ["clipboard-monitor"] }
 unikvm-protocol.workspace = true
 tokio.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+unikvm-core.workspace = true
+unikvm-platform = { workspace = true, features = ["windows-file-drop"] }
+
 [build-dependencies]
 embed-manifest.workspace = true

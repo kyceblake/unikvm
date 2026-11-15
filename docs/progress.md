@@ -1,5 +1,11 @@
 # Progress
 
+## Explorer delivery of a paired file offer
+
+- Connected the Windows native Shell drop to the existing approval, progress, and verified file transfer. The `drag-receive` preview uses a pending single-file offer. Releasing over Explorer requests it, and the receiving clipboard keeps its existing contents. The peer clipboard protocol stays at v6. [Preview instructions](platform-support.md#test-explorer-with-a-paired-file-offer)
+- Windows workspace formatting, strict Clippy, tests, and build passed. The native Shell test confirmed that the destination requests the verified file only after release and copies identical bytes. The new IPC command passed an isolated same-user named-pipe test. The Apple Silicon platform check passed at compile time. Cargo deny passed.
+- Next, verify the preview with the Windows agent and a paired Mac, then wire the held-button edge handoff to the destination helper. Finder delivery still requires AppKit file promises.
+
 ## Deferred Windows drop probe
 
 - Added `--deferred FILE` on Windows. The probe offers a Unicode filename and size while the drag is held. It opens a read-only stream when the released drag's target requests contents. Escape leaves the stream closed. [Windows test instructions](platform-support.md#probe-a-deferred-windows-drop)

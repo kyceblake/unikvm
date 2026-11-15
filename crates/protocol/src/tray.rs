@@ -28,6 +28,7 @@ pub enum Phase {
     Ready,
     Cancelled,
     Failed,
+    Dropped,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -136,6 +137,7 @@ pub(crate) async fn read_view(reader: &mut (impl AsyncRead + Unpin)) -> io::Resu
                 1 => Phase::Ready,
                 2 => Phase::Cancelled,
                 3 => Phase::Failed,
+                4 => Phase::Dropped,
                 _ => return Err(invalid()),
             };
             let items = reader.read_u8().await?;
