@@ -27,10 +27,10 @@ fn run() -> Result<()> {
     match command.as_deref().and_then(|arg| arg.to_str()) {
         Some("status") if args.next().is_none() => {}
         Some("clipboard") if args.next().is_none() => return clipboard::open(false),
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         Some("drag-receive") => return file_drop::receive(args),
-        #[cfg(not(target_os = "windows"))]
-        Some("drag-receive") => bail!("the native drop preview requires Windows"),
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        Some("drag-receive") => bail!("native file drops require Windows or macOS"),
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         Some("drag-source") => return file_drop::source(args),
         Some("tray") => {

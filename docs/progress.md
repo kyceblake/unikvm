@@ -1,5 +1,11 @@
 # Progress
 
+## Explorer-to-Finder held-button handoff
+
+- Pulled `7d91b6b` and added the native Finder receiver for the existing Explorer drag source. The Mac helper arms an AppKit file promise before Windows hands off the held pointer. Finder requests the file after release, then macOS shows **Receive / Decline**. The helper writes the verified copy to the native destination and leaves the clipboard intact. The existing peer protocol and pairing settings still apply.
+- Windows formatting, strict workspace Clippy, 77 tests, and workspace build passed. Updated the optional Windows probe's test fixtures for the current drag source fields. All four Windows drag tests passed, including the native Shell destination test. Cargo deny passed with existing duplicate-version warnings. The Apple Silicon workspace and deferred drop probe passed strict Clippy as compile-time checks.
+- Next, run the local [deferred Finder probe](platform-support.md#probe-a-deferred-finder-drop) and the [paired Explorer-to-Finder test](platform-support.md#test-an-explorer-drag-across-the-edge-into-finder) on macOS. Verify matching SHA-256 hashes, source retention, Escape, Decline, and normal pointer control after the drop.
+
 ## Windows mouse returning a Finder drag
 
 - The paired retry exposed Quartz reporting the injected primary hold through hardware-state queries. Removed that ambiguous query from Mac remote-drag admission/cancellation; the sink's authenticated held state and the session's physical-takeover monitor remain authoritative. The operator confirmed that Windows-owned dragging now crosses back to Windows and opens Download/Decline. The operator approved Download and confirmed the file arrived in Explorer and opened correctly; a separate source/destination SHA-256 comparison remains unverified. Mac formatting, strict Clippy, workspace tests, and build passed.

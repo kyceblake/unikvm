@@ -1,6 +1,12 @@
 #![allow(unsafe_code)]
 
-use std::{ffi::CString, io, os::unix::ffi::OsStrExt, path::PathBuf, ptr::NonNull};
+use std::{
+    ffi::CString,
+    io,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+    ptr::NonNull,
+};
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
@@ -23,12 +29,7 @@ use super::Source;
 pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
     let source = match source {
         Some(Source::File(path)) => Some(path),
-        Some(Source::Deferred(_)) => {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "the deferred drop probe requires Windows",
-            ));
-        }
+        Some(Source::Deferred(path)) => return run_deferred(edge, path),
         None => None,
     };
     let main = MainThreadMarker::new()
@@ -114,6 +115,32 @@ pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
         window.setDelegate(None);
         Ok(())
     })
+}
+
+fn run_deferred(edge: Edge, path: &Path) -> io::Result<()> {
+    let path = path.canonicalize()?;
+    let metadata = path.metadata()?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|_| metadata.is_file())
+        .ok_or_else(|| io::Error::other("choose a regular file with a UTF-8 name"))?
+        .to_owned();
+    let copied = crate::file_drop::run_received(
+        edge,
+        &name,
+        metadata.len(),
+        move || {
+            println!("Finder requested the promised file after release.");
+            Ok(path.clone())
+        },
+        || {
+            println!("Press on the highlighted edge and drag into an empty Finder folder.");
+            Ok(())
+        },
+    )?;
+    super::report_drop(copied);
+    Ok(())
 }
 
 define_class!(

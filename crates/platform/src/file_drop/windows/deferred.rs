@@ -289,7 +289,11 @@ mod tests {
         let file = VirtualFile::new(&path, released.clone()).unwrap();
         let [descriptor, contents, _] = file.formats;
         let data: IDataObject = file.into();
-        let source: IDropSource = FileSource(released).into();
+        let source: IDropSource = FileSource {
+            released,
+            deadline: None,
+        }
+        .into();
 
         // SAFETY: COM objects and both returned media belong to this OLE apartment.
         unsafe {
@@ -323,7 +327,11 @@ mod tests {
             // Start a fresh drag with the same metadata and exercise the successful path.
             let next_released = Arc::new(AtomicBool::new(false));
             let next_data = file_object(&path, next_released.clone()).unwrap();
-            let next_source: IDropSource = FileSource(next_released).into();
+            let next_source: IDropSource = FileSource {
+                released: next_released,
+                deadline: None,
+            }
+            .into();
             assert_eq!(
                 next_source.QueryContinueDrag(false, MODIFIERKEYS_FLAGS(0)),
                 DRAGDROP_S_DROP
@@ -370,7 +378,11 @@ mod tests {
             }
         })
         .unwrap();
-        let source: IDropSource = FileSource(released).into();
+        let source: IDropSource = FileSource {
+            released,
+            deadline: None,
+        }
+        .into();
 
         // SAFETY: The test owns both locations and the Shell interfaces remain in this apartment.
         unsafe {

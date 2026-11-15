@@ -21,6 +21,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.104"
 blake3 = { version = "1.8.7", features = ["pure"] }
+block2 = { version = "0.6.2", default-features = false, features = ["alloc"] }
 core-foundation = "0.10.1"
 core-graphics = { version = "0.25.0", features = ["highsierra"] }
 embed-manifest = "1.5.1"

@@ -60,7 +60,7 @@ impl Control {
             .context("read primary display for edge switching")?;
         let mut capture =
             Capture::with_paste(allow_send, edge, paste).context("start local input monitor")?;
-        let native = (cfg!(windows) && self.file_drag).then(|| desktop.file_drop.clone());
+        let native = self.file_drag.then(|| desktop.file_drop.clone());
         let (local_drag, _source) = if self.file_drag
             && let Some(edge) = edge
         {

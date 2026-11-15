@@ -830,7 +830,7 @@ impl Link<'_> {
             return self.tell(Control::Decision { id, accept: false });
         };
         let deadline = Instant::now() + if file { FILE_OFFER } else { APPROVAL };
-        let native_offer = if cfg!(windows)
+        let native_offer = if (cfg!(windows) || drag.is_some())
             && let Layout::Files(files) = &offer.layout
             && let [file] = files.as_slice()
             && let Ok(approval) = make_approval(&offer.layout, total)

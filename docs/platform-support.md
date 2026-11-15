@@ -41,7 +41,7 @@ Use `--right` to test the other edge. Drag a regular file from Explorer or Finde
 
 Live Explorer and Finder gestures both exposed file references before release. The Windows test also reads a real Shell data object. The probe uses OLE `IDropTarget` and AppKit `NSDraggingInfo`. [Windows Shell drag data](https://learn.microsoft.com/en-us/windows/win32/shell/dataobject) · [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
 
-The Windows source helper observes one file on the configured edge during an unmodified primary-button drag. The input monitor checks that the same physical press is still held on the unlocked desktop before ending the Explorer drag after a peer grant. The Windows source currently uses the standard left-button primary mapping. Finder destination support is pending. [Windows OLE drop target](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragenter) · [Windows input injection](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
+The Windows source helper observes one file on the configured edge during an unmodified primary-button drag. The input monitor checks that the same physical press is still held on the unlocked desktop before ending the Explorer drag after a peer grant. The Windows source uses the standard left-button primary mapping. [Windows OLE drop target](https://learn.microsoft.com/en-us/windows/win32/api/oleidl/nf-oleidl-idroptarget-dragenter) · [Windows input injection](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput)
 
 The Windows desktop regression verifies the tagged Escape press and release and suppresses both events before they reach the foreground application.
 
@@ -70,7 +70,17 @@ cargo run --locked -p unikvm-platform --features file-drag-probe --example file_
 cargo test --locked -p unikvm-platform --features file-drag-probe shell_folder_copies_the_virtual_file -- --ignored --nocapture
 ```
 
-The second command exercises the native Shell folder drop handler directly and verifies the destination bytes. The first checks the full pointer gesture. Deferred drops on macOS require an AppKit file promise probe.
+The second command exercises the native Shell folder drop handler directly and verifies the destination bytes. The first checks the full pointer gesture.
+
+### Probe a deferred Finder drop
+
+Open an empty Finder folder. Start the probe with a local sample outside that folder.
+
+```sh
+cargo run --locked -p unikvm-platform --features file-drag-probe --example file_drag_probe -- --right --deferred "path/to/sample.txt"
+```
+
+Press on the highlighted edge and hold over the Finder folder. The probe should print `Finder requested the promised file after release.` only when you drop. Compare the new file's SHA-256 with the source. Run again with an empty destination and press Escape while dragging. The folder should stay empty. This local probe exercises AppKit's file promise with an existing sample. [AppKit file promises](https://developer.apple.com/documentation/appkit/supporting-drag-and-drop-through-file-promises)
 
 ### Test Explorer with a paired file offer
 
@@ -90,7 +100,13 @@ Build the workspace and restart the agent and its desktop helper on both compute
 
 Open an empty Explorer folder on Windows. Drag one regular file in Finder with the Mac's mouse or trackpad. Keep holding the primary button at the configured edge until the pointer appears on Windows, then move into Explorer and release. **Download / Decline** should appear only after release. Approve the drop, compare the destination file's SHA-256 with the source, and confirm the original stays in place. The Windows clipboard should retain its previous contents.
 
-Repeat with Escape before release and with **Decline** after release. Neither should create a destination file. Check that ordinary edge switching still works afterward. The preview supports Finder to Explorer, one regular file per drag, and the existing 50 MB limit. It requires an unlocked desktop and a free primary display edge. Restart the Mac helper after changing its display arrangement. [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard) · [Windows OLE drag loop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-dodragdrop)
+Repeat with Escape before release and with **Decline** after release. Neither should create a destination file. Check that ordinary edge switching still works afterward. The preview supports one regular file per drag up to 50 MB. It requires an unlocked desktop and a free primary display edge. Restart the Mac helper after changing its display arrangement. [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard) · [Windows OLE drag loop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-dodragdrop)
+
+### Test an Explorer drag across the edge into Finder
+
+Update both agents and their desktop helpers. Use the same `input.file_drag = true`, peer sides, and pinned clipboard file-sharing settings as above. Open an empty Finder folder. With the Windows mouse, drag one regular file from Explorer to the left edge when the Mac is on the left. Keep holding until the pointer appears on the Mac, move into Finder, and release.
+
+Approve **Receive** on the Mac and check that the receiving tray reports **File dropped**. Compare the two files with `Get-FileHash -Algorithm SHA256` on Windows and `shasum -a 256` on macOS. Confirm that the source remains in Explorer and that the Mac clipboard keeps its previous contents. Repeat with Escape before release and **Decline** afterward. Each canceled test should leave the destination empty and allow normal pointer control to resume. Use an unlocked desktop and a free primary display edge. One regular file up to 50 MB is supported per drag. Live Finder delivery still needs desktop verification.
 
 ### Return a Finder drag using the Windows mouse
 

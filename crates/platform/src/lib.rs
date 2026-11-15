@@ -9,7 +9,10 @@ pub mod clipboard;
 ))]
 pub mod drag_probe;
 
-#[cfg(all(target_os = "windows", feature = "windows-file-drop"))]
+#[cfg(any(
+    all(target_os = "macos", feature = "macos-file-drop"),
+    all(target_os = "windows", feature = "windows-file-drop")
+))]
 pub mod file_drop;
 
 #[cfg(all(target_os = "macos", feature = "macos-file-drag"))]

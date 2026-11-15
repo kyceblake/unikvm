@@ -1,38 +1,31 @@
 //! Desktop helpers for native file drags. OLE and AppKit run on their platform UI threads.
 
 use std::ffi::OsString;
-#[cfg(target_os = "windows")]
 use std::io;
 use std::path::PathBuf;
-#[cfg(target_os = "windows")]
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
-#[cfg(target_os = "windows")]
-use tokio::time::sleep;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 use unikvm_core::geometry::Edge;
+use unikvm_platform::file_drop::run_received;
 #[cfg(target_os = "windows")]
-use unikvm_platform::file_drop::{run_received, run_received_return};
+use unikvm_platform::file_drop::run_received_return;
 use unikvm_platform::local::{Endpoint, STATUS_TIMEOUT};
 use unikvm_protocol::local::file_drop::{Command, Reply, exchange};
 
-#[cfg(target_os = "windows")]
 const WAIT: Duration = Duration::from_secs(370);
-#[cfg(target_os = "windows")]
 const POLL: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
-#[cfg(target_os = "windows")]
 struct Delivery {
     requested: bool,
     path: Option<PathBuf>,
 }
 
-#[cfg(target_os = "windows")]
 pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     let edge = match args.next().as_deref() {
         None => Edge::Left,
@@ -56,6 +49,11 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         args.next().is_none(),
         "usage: unikvm drag-receive [--left | --right]"
     );
+    #[cfg(target_os = "macos")]
+    anyhow::ensure!(
+        granted.is_some() && !returned,
+        "Finder file drops start automatically from a paired drag"
+    );
 
     let runtime = Arc::new(
         tokio::runtime::Builder::new_current_thread()
@@ -78,6 +76,7 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         {
             return Err(io::Error::other("the native drop is no longer active"));
         }
+        #[cfg(target_os = "windows")]
         if returned {
             runtime
                 .block_on(async {
@@ -97,11 +96,14 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
         }
         Ok(())
     };
+    #[cfg(target_os = "windows")]
     let run = if returned {
         run_received_return
     } else {
         run_received
     };
+    #[cfg(target_os = "macos")]
+    let run = run_received;
     let result = run(
         edge,
         &offer.file.name,
@@ -129,17 +131,21 @@ pub(super) fn receive(mut args: impl Iterator<Item = OsString>) -> Result<()> {
     } else {
         false
     };
-    result.context("run the Explorer file drag")?;
+    result.context("run the native file drag")?;
     if copied {
         anyhow::ensure!(recorded, "the agent did not record the drop result");
-        println!("Explorer accepted the file copy.");
+        let destination = if cfg!(target_os = "macos") {
+            "Finder"
+        } else {
+            "Explorer"
+        };
+        println!("{destination} accepted the file copy.");
     } else {
         println!("Drag ended without an accepted file copy.");
     }
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
 async fn receive_path(id: u64, returned: bool, delivery: &mut Delivery) -> Result<PathBuf> {
     if !delivery.requested {
         if returned {
