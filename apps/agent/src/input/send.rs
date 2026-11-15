@@ -47,6 +47,7 @@ struct ReturnTarget<'a> {
 }
 
 struct ActiveMode<'a> {
+    connection: &'a quinn::Connection,
     native: bool,
     returns: Option<ReturnTarget<'a>>,
     diagnostics: bool,
@@ -218,6 +219,7 @@ async fn control(
         shortcut,
         initial_heartbeat,
         ActiveMode {
+            connection: &connection,
             native,
             diagnostics,
             returns: returns.zip(side).map(|(drops, side)| ReturnTarget {
@@ -268,6 +270,7 @@ async fn active(
     mode: ActiveMode<'_>,
 ) -> Result<ControlEnd> {
     let ActiveMode {
+        connection,
         native,
         returns,
         diagnostics,
@@ -339,7 +342,7 @@ async fn active(
                 let acknowledged = Instant::now();
                 ensure!(expires > acknowledged, "peer input acknowledgment arrived after the lease expired");
                 if let (Some(probes), Some((kind, submitted))) = (&mut probes, sample) {
-                    probes.latencies.acknowledgment(kind, sent, submitted, acknowledged);
+                    probes.latencies.acknowledgment(kind, sent, submitted, acknowledged, connection.stats().path);
                 }
                 if !peer_stopped {
                     if expires > deadline.deadline() {

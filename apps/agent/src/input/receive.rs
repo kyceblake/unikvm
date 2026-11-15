@@ -349,6 +349,8 @@ async fn inject(
     let mut timings = options
         .diagnostics
         .then(|| Latencies::new("receive_to_native_post"));
+    #[cfg(target_os = "macos")]
+    sink.set_post_diagnostics(options.diagnostics);
     let mut motion_received: Option<ReceivedSample> = None;
     let mut was_locked = sink.is_locked_receiver();
     let mut motion = if entry.is_none() {
@@ -382,10 +384,10 @@ async fn inject(
                         }
                         if !empty {
                             let posting = motion_received.as_ref().map(|_| Instant::now());
-                            if let Some(height) = move_pointer(sink, edge, dx, dy)? {
+                            if let Some(height) = sink.move_or_exit(edge, dx, dy)? {
                                 return Ok(Some(height));
                             }
-                            record_post(&mut timings, InputKind::MouseMotion, motion_received.take().zip(posting));
+                            record_post(&mut timings, sink, InputKind::MouseMotion, motion_received.take().zip(posting));
                         }
                         tokio::task::yield_now().await;
                     }
@@ -433,7 +435,7 @@ async fn inject(
                 }
                 let posting = received.as_ref().map(|_| Instant::now());
                 if let InputEvent::PointerMove { dx, dy } = event {
-                    if let Some(height) = move_pointer(sink, edge, dx, dy)? {
+                    if let Some(height) = sink.move_or_exit(edge, dx, dy)? {
                         return Ok(Some(height));
                     }
                 } else {
@@ -445,7 +447,7 @@ async fn inject(
                         sink.send(event)?;
                     }
                 }
-                record_post(&mut timings, event.into(), received.zip(posting));
+                record_post(&mut timings, sink, event.into(), received.zip(posting));
             }
             Frame::Heartbeat(token) => {
                 if let Some(drag) = drag.as_mut().filter(|drag| !drag.released) {
@@ -513,29 +515,21 @@ fn pointer_pacer(sink: &InputSink) -> Option<MotionPacer> {
     }
 }
 
-fn move_pointer(
-    sink: &mut InputSink,
-    edge: Option<EdgeLayout>,
-    dx: i32,
-    dy: i32,
-) -> std::io::Result<Option<u16>> {
-    if !sink.is_locked_receiver()
-        && let Some(edge) = edge
-        && let Some(height) = sink.exit_edge(edge, dx, dy)?
-    {
-        return Ok(Some(height));
-    }
-    sink.send(InputEvent::PointerMove { dx, dy })?;
-    Ok(None)
-}
-
 fn record_post(
     timings: &mut Option<Latencies>,
+    sink: &mut InputSink,
     kind: InputKind,
     sample: Option<(ReceivedSample, Instant)>,
 ) {
     if let (Some(timings), Some((sample, posting))) = (timings, sample) {
-        timings.posted(kind, sample, posting);
+        #[cfg(target_os = "macos")]
+        let native = sink.take_post_timing();
+        #[cfg(target_os = "windows")]
+        let native = {
+            let _ = sink;
+            None
+        };
+        timings.posted(kind, sample, posting, native);
     }
 }
 
@@ -549,7 +543,7 @@ fn flush_motion(
     if dx != 0 || dy != 0 {
         let posting = sample.as_ref().map(|_| Instant::now());
         sink.send(InputEvent::PointerMove { dx, dy })?;
-        record_post(timings, InputKind::MouseMotion, sample.zip(posting));
+        record_post(timings, sink, InputKind::MouseMotion, sample.zip(posting));
     }
     Ok(())
 }

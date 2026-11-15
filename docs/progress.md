@@ -2,13 +2,16 @@
 
 ## Performance baseline and optimization
 
+- Added a 1 ms scheduling deadline for the first useful step of new mouse motion on both receivers. Remaining motion keeps its display cadence, and pending movement still posts before keys and clicks.
+- macOS now shares one access check between edge detection and pointer posting. Its diagnostics split access validation, event preparation, and the CoreGraphics post call. Acknowledgment summaries include Quinn path RTT and loss. The diagnostic budget is now 3 ms.
+- Windows formatting, strict Clippy, 84 workspace tests, and debug and release builds passed. The native Windows pointer probe passed on the 240 Hz display. Apple Silicon passed strict Clippy at compile time. The paired latency target and cursor feel still need native verification.
 - The first Mac → Windows run on a 240 Hz receiver measured 1.68 ms mean and 21.53 ms maximum from received motion to native posting across 696 samples. Windows checksum-verified a 2.54 MB file at 2.10 MB/s. The slowest motion sample occurred before that transfer.
 - Extended diagnostics with a 5 ms budget and 95th percentile by input category. Each summary breaks down the same worst sample so sender-side submission, round-trip acknowledgment, receiver pacing, and native posting can be compared.
 - Windows formatting, strict Clippy, 82 workspace tests, and debug and release builds passed. Apple Silicon passed strict Clippy at compile time. The extended fields still need a paired run.
 - The operator confirmed the paired file-sharing checks passed. Phase 6 now defines a performance baseline before tuning and release hardening.
 - Added opt-in `diagnostics = true` for the regular agent, including release builds. It logs sampled input acknowledgment round trips, receiver native posting times, and sender and verified receiver file throughput. The existing peer protocol and input pacing remain compatible. [Measurement definitions and baseline procedure](performance.md)
 - Windows formatting, strict Clippy, 80 workspace tests, and debug and release builds passed. The Apple Silicon workspace passed strict Clippy at compile time.
-- Next, record Windows ↔ macOS latency and verified receiver throughput with release builds, at idle and during a 50 MB transfer. Compare the share over 5 ms and the stage breakdown before choosing the first optimization.
+- Next, record Windows ↔ macOS latency and verified receiver throughput with release builds, at idle and during a 50 MB transfer. Compare p95 against 3 ms and check cursor smoothness, edge handoff, and file drags.
 
 ## File verification and drag edge visibility
 

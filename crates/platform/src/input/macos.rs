@@ -3,7 +3,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use super::EdgeLayout;
+use super::{EdgeLayout, NativePostTiming};
 use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField, KeyCode,
@@ -42,6 +42,13 @@ pub struct MacInputSink {
     bounds: CGRect,
     wheel_remainder: [i64; 2],
     last_click: [Option<(Instant, CGPoint, i64)>; 5],
+    post_profile: Option<PostProfile>,
+}
+
+#[derive(Default)]
+struct PostProfile {
+    checked: Option<(Duration, Instant)>,
+    completed: Option<NativePostTiming>,
 }
 
 impl MacInputSink {
@@ -60,7 +67,30 @@ impl MacInputSink {
     }
 
     pub fn exit_edge(&mut self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
-        self.check_access()?;
+        if self.check_access()? {
+            return Ok(None);
+        }
+        self.exit_checked(edge, dx, dy)
+    }
+
+    pub fn move_or_exit(
+        &mut self,
+        edge: Option<EdgeLayout>,
+        dx: i32,
+        dy: i32,
+    ) -> io::Result<Option<u16>> {
+        let locked = self.begin_input_post()?;
+        if !locked
+            && let Some(edge) = edge
+            && let Some(height) = self.exit_checked(edge, dx, dy)?
+        {
+            return Ok(Some(height));
+        }
+        self.move_pointer(dx, dy)?;
+        Ok(None)
+    }
+
+    fn exit_checked(&mut self, edge: EdgeLayout, dx: i32, dy: i32) -> io::Result<Option<u16>> {
         if self.keys.contains(&true) || self.buttons.contains(&true) {
             return Ok(None);
         }
@@ -133,10 +163,12 @@ impl MacInputSink {
                 "grant Accessibility to the process posting input in System Settings",
             ));
         }
-        if !super::macos_session::receive_allowed(
+        if super::macos_session::receive_locked(
             allow_locked_receive,
             super::macos_capture::secure_input(),
-        ) || super::macos_capture::physical_input_held()
+        )
+        .is_none()
+            || super::macos_capture::physical_input_held()
         {
             return Err(io::Error::other(
                 "release local keys and mouse buttons and exit Secure Input before sharing input",
@@ -184,6 +216,7 @@ impl MacInputSink {
             bounds,
             wheel_remainder: [0; 2],
             last_click: [None; 5],
+            post_profile: None,
         })
     }
 
@@ -192,7 +225,7 @@ impl MacInputSink {
     }
 
     pub fn send(&mut self, event: InputEvent) -> io::Result<()> {
-        self.check_access()?;
+        self.begin_input_post()?;
         match event {
             InputEvent::Key { usage, state } => self.key(usage, state),
             InputEvent::PointerButton { button, state } => self.button(button, state),
@@ -205,21 +238,47 @@ impl MacInputSink {
     }
 
     pub fn check_permission(&self) -> bool {
-        Self::has_permission()
-            && super::macos_session::receive_allowed(
-                self.allow_locked_receive,
-                super::macos_capture::secure_input(),
-            )
+        self.input_access().is_some()
     }
 
-    fn check_access(&self) -> io::Result<()> {
-        if !self.check_permission() {
-            return Err(io::Error::new(
+    fn input_access(&self) -> Option<bool> {
+        if !Self::has_permission() {
+            return None;
+        }
+        super::macos_session::receive_locked(
+            self.allow_locked_receive,
+            super::macos_capture::secure_input(),
+        )
+    }
+
+    fn check_access(&self) -> io::Result<bool> {
+        self.input_access().ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "macOS input reception is not permitted in this session",
-            ));
+            )
+        })
+    }
+
+    pub fn set_post_diagnostics(&mut self, enabled: bool) {
+        self.post_profile = enabled.then(PostProfile::default);
+    }
+
+    pub fn take_post_timing(&mut self) -> Option<NativePostTiming> {
+        let profile = self.post_profile.as_mut()?;
+        profile.checked = None;
+        profile.completed.take()
+    }
+
+    fn begin_input_post(&mut self) -> io::Result<bool> {
+        let started = self.post_profile.as_ref().map(|_| Instant::now());
+        let locked = self.check_access()?;
+        if let (Some(started), Some(profile)) = (started, &mut self.post_profile) {
+            let checked = Instant::now();
+            profile.checked = Some((checked.duration_since(started), checked));
+            profile.completed = None;
         }
-        Ok(())
+        Ok(locked)
     }
 
     pub fn is_locked_receiver(&self) -> bool {
@@ -381,7 +440,7 @@ impl MacInputSink {
         Ok(())
     }
 
-    fn post(&self, event: &CGEvent, extra: CGEventFlags) {
+    fn post(&mut self, event: &CGEvent, extra: CGEventFlags) {
         event.set_integer_value_field(EventField::EVENT_SOURCE_USER_DATA, EVENT_TAG);
         let mut flags = extra;
         for (left, right, flag) in [
@@ -394,7 +453,19 @@ impl MacInputSink {
         }
         flags.set(CGEventFlags::CGEventFlagAlphaShift, self.caps_lock);
         event.set_flags(flags);
-        event.post(CGEventTapLocation::HID);
+        if let Some(profile) = &mut self.post_profile
+            && let Some((access, checked)) = profile.checked.take()
+        {
+            let posting = Instant::now();
+            event.post(CGEventTapLocation::HID);
+            profile.completed = Some(NativePostTiming {
+                access,
+                prepare: posting.duration_since(checked),
+                post: posting.elapsed(),
+            });
+        } else {
+            event.post(CGEventTapLocation::HID);
+        }
     }
 }
 

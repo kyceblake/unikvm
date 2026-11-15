@@ -71,9 +71,10 @@ pub(super) fn is_locked() -> bool {
     session.eligible && session.locked
 }
 
-pub(super) fn receive_allowed(allow_locked: bool, secure: bool) -> bool {
+pub(super) fn receive_locked(allow_locked: bool, secure: bool) -> Option<bool> {
     let session = current();
-    session.eligible && may_receive(allow_locked, session.locked, secure)
+    (session.eligible && may_receive(allow_locked, session.locked, secure))
+        .then_some(session.locked)
 }
 
 pub(super) fn may_receive(allow_locked: bool, locked: bool, secure: bool) -> bool {

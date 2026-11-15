@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 use unikvm_core::input::InputEvent;
+use unikvm_platform::input::NativePostTiming;
 
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 const PROBE_INTERVAL: Duration = Duration::from_millis(250);
-const BUDGET_US: u64 = 5_000;
+const BUDGET_US: u64 = 3_000;
 const BIN_US: u64 = 250;
 const BINS: usize = 129;
 
@@ -60,11 +61,13 @@ enum Stages {
     RoundTrip {
         submit: Duration,
         after_submit: Duration,
+        path: quinn::PathStats,
     },
     NativePost {
         before_post: Duration,
         post: Duration,
         pacing: Option<Pacing>,
+        native: Option<NativePostTiming>,
     },
 }
 
@@ -149,6 +152,7 @@ impl Latencies {
         sent: Instant,
         submitted: Instant,
         acknowledged: Instant,
+        path: quinn::PathStats,
     ) {
         self.record(
             kind,
@@ -157,11 +161,18 @@ impl Latencies {
             Stages::RoundTrip {
                 submit: submitted.duration_since(sent),
                 after_submit: acknowledged.duration_since(submitted),
+                path,
             },
         );
     }
 
-    pub fn posted(&mut self, kind: InputKind, sample: ReceivedSample, posting: Instant) {
+    pub fn posted(
+        &mut self,
+        kind: InputKind,
+        sample: ReceivedSample,
+        posting: Instant,
+        native: Option<NativePostTiming>,
+    ) {
         let posted = Instant::now();
         self.record(
             kind,
@@ -171,6 +182,7 @@ impl Latencies {
                 before_post: posting.duration_since(sample.received),
                 post: posted.duration_since(posting),
                 pacing: sample.pacing,
+                native,
             },
         );
     }
@@ -189,16 +201,34 @@ impl Latencies {
             .zip(std::mem::take(&mut self.buckets))
         {
             let Some(worst) = bucket.worst else { continue };
-            let (submit, after_submit, before_post, post, pacing) = match worst {
+            let (submit, after_submit, path, before_post, post, pacing, native) = match worst {
                 Stages::RoundTrip {
                     submit,
                     after_submit,
-                } => (Some(submit), Some(after_submit), None, None, None),
+                    path,
+                } => (
+                    Some(submit),
+                    Some(after_submit),
+                    Some(path),
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
                 Stages::NativePost {
                     before_post,
                     post,
                     pacing,
-                } => (None, None, Some(before_post), Some(post), pacing),
+                    native,
+                } => (
+                    None,
+                    None,
+                    None,
+                    Some(before_post),
+                    Some(post),
+                    pacing,
+                    native,
+                ),
             };
             tracing::info!(
                 target: "unikvm::diagnostics",
@@ -212,10 +242,16 @@ impl Latencies {
                 over_budget = bucket.over_budget,
                 worst_submit_us = submit.map(micros),
                 worst_after_submit_us = after_submit.map(micros),
+                worst_quic_rtt_us = path.map(|path| micros(path.rtt)),
+                worst_quic_min_rtt_us = path.map(|path| micros(path.min_rtt)),
+                worst_quic_lost_packets_total = path.map(|path| path.lost_packets),
                 worst_before_post_us = before_post.map(micros),
                 worst_post_us = post.map(micros),
                 worst_zero_steps = pacing.map(|pacing| pacing.zero_steps),
                 worst_tick_late_us = pacing.map(|pacing| micros(pacing.max_late)),
+                worst_native_access_us = native.map(|native| micros(native.access)),
+                worst_native_prepare_us = native.map(|native| micros(native.prepare)),
+                worst_native_post_us = native.map(|native| micros(native.post)),
                 "input latency"
             );
         }
@@ -262,28 +298,30 @@ mod tests {
     use unikvm_core::input::{ButtonState, KeyUsage};
 
     #[test]
-    fn budget_includes_five_milliseconds_and_details_follow_the_slowest_sample() {
+    fn budget_includes_three_milliseconds_and_details_follow_the_slowest_sample() {
         let mut latency = Latency::default();
         let send = Stages::RoundTrip {
             submit: Duration::from_micros(200),
-            after_submit: Duration::from_micros(4_800),
+            after_submit: Duration::from_micros(2_800),
+            path: quinn::PathStats::default(),
         };
         for _ in 0..19 {
-            latency.add(Duration::from_millis(5), send);
+            latency.add(Duration::from_millis(3), send);
         }
         let mut motion = ReceivedSample::new();
         motion.paced_step(Duration::from_micros(11), true);
         motion.paced_step(Duration::from_micros(31), false);
         let post = Stages::NativePost {
-            before_post: Duration::from_micros(4_901),
+            before_post: Duration::from_micros(2_901),
             post: Duration::from_micros(100),
             pacing: motion.pacing,
+            native: None,
         };
-        latency.add(Duration::from_micros(5_001), post);
+        latency.add(Duration::from_micros(3_001), post);
         assert_eq!(latency.over_budget, 1);
-        assert_eq!(latency.p95_upper_us(), 5_000);
-        latency.add(Duration::from_micros(5_000), send);
-        assert_eq!(latency.max_us, 5_001);
+        assert_eq!(latency.p95_upper_us(), 3_000);
+        latency.add(Duration::from_micros(3_000), send);
+        assert_eq!(latency.max_us, 3_001);
         assert!(matches!(
             latency.worst,
             Some(Stages::NativePost { pacing: Some(Pacing { zero_steps: 1, max_late }), .. })
@@ -297,6 +335,7 @@ mod tests {
         let stages = Stages::RoundTrip {
             submit: Duration::ZERO,
             after_submit: Duration::ZERO,
+            path: quinn::PathStats::default(),
         };
         for _ in 0..18 {
             latency.add(Duration::from_millis(4), stages);

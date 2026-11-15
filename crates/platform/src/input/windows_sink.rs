@@ -55,6 +55,21 @@ impl WindowsInputSink {
         Ok(height)
     }
 
+    pub fn move_or_exit(
+        &mut self,
+        edge: Option<EdgeLayout>,
+        dx: i32,
+        dy: i32,
+    ) -> io::Result<Option<u16>> {
+        if let Some(edge) = edge
+            && let Some(height) = self.exit_edge(edge, dx, dy)?
+        {
+            return Ok(Some(height));
+        }
+        self.send(InputEvent::PointerMove { dx, dy })?;
+        Ok(None)
+    }
+
     pub(super) fn pointer_display(&self) -> super::windows_motion::PointerDisplay {
         super::windows_motion::PointerDisplay::default()
     }

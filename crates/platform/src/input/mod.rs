@@ -45,6 +45,13 @@ pub use macos::{MacInputSink, MacInputSink as InputSink};
 pub use macos_capture::request_monitor_permission;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use motion::MotionPacer;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[derive(Debug, Clone, Copy)]
+pub struct NativePostTiming {
+    pub access: std::time::Duration,
+    pub prepare: std::time::Duration,
+    pub post: std::time::Duration,
+}
 #[cfg(all(target_os = "windows", feature = "windows-file-drop"))]
 pub(crate) use windows_sink::EVENT_TAG;
 #[cfg(target_os = "windows")]

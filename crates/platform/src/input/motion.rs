@@ -27,9 +27,10 @@ impl MotionPacer {
 
     /// False means the caller should deliver this sample immediately.
     pub fn queue(&mut self, dx: i32, dy: i32) -> bool {
+        let arrived = Instant::now();
         self.display.update();
         if let Some(period) = self.display.period {
-            self.motion.push(dx, dy, Instant::now(), period);
+            self.motion.push(dx, dy, arrived, period);
             true
         } else {
             false

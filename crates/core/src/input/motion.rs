@@ -8,9 +8,11 @@ pub struct PointerMotion {
     frames: u32,
     last_sample: Option<Instant>,
     next_frame: Option<Instant>,
+    first_post_by: Option<Instant>,
 }
 
 const MAX_SAMPLE_INTERVAL: Duration = Duration::from_millis(32);
+const FIRST_POST_WAIT: Duration = Duration::from_millis(1);
 
 impl PointerMotion {
     pub fn push(&mut self, dx: i32, dy: i32, now: Instant, frame_period: Duration) {
@@ -26,21 +28,40 @@ impl PointerMotion {
         self.remaining[0] = self.remaining[0].saturating_add(dx);
         self.remaining[1] = self.remaining[1].saturating_add(dy);
         self.frames = self.frames.max(frames);
+        if self.remaining == [0, 0] {
+            self.frames = 0;
+            self.first_post_by = None;
+        } else if dx != 0 || dy != 0 {
+            self.first_post_by.get_or_insert(now + FIRST_POST_WAIT);
+        }
         // Re-evaluate the next slot against the current monitor's frame period.
         self.next_frame = self.next_frame.map(|last| last.min(now + frame_period));
     }
 
     pub fn due(&self, now: Instant) -> Option<Instant> {
-        (self.remaining != [0, 0]).then(|| self.next_frame.unwrap_or(now))
+        (self.remaining != [0, 0]).then(|| {
+            let frame = self.next_frame.unwrap_or(now);
+            self.first_post_by
+                .map_or(frame, |deadline| frame.min(deadline))
+        })
     }
 
     pub fn step(&mut self, now: Instant, frame_period: Duration) -> [i32; 2] {
-        let divisor = i64::from(self.frames.max(1));
-        let step = self.remaining.map(|delta| {
+        let early = self.next_frame.is_some_and(|frame| frame > now);
+        let divisor = i64::from(self.frames.max(if early { 2 } else { 1 }));
+        let mut step = self.remaining.map(|delta| {
             // Round near the middle of each step so slow sub-frame movement starts promptly.
             let delta = i64::from(delta);
             ((delta + delta.signum() * (divisor / 2)) / divisor) as i32
         });
+        if step == [0, 0] && self.first_post_by.is_some() {
+            let axis =
+                usize::from(self.remaining[1].unsigned_abs() > self.remaining[0].unsigned_abs());
+            step[axis] = self.remaining[axis].signum();
+        }
+        if step != [0, 0] {
+            self.first_post_by = None;
+        }
         for (remaining, delta) in self.remaining.iter_mut().zip(step) {
             *remaining -= delta;
         }
@@ -51,16 +72,19 @@ impl PointerMotion {
         };
         // Keep the frame cadence after small timer delays. Skip missed slots
         // after a stall so the cursor does not replay them in a burst.
-        self.next_frame = self
-            .next_frame
-            .map(|scheduled| scheduled + frame_period)
-            .filter(|&next| next > now && next <= now + frame_period)
-            .or(Some(now + frame_period));
+        if !early {
+            self.next_frame = self
+                .next_frame
+                .map(|scheduled| scheduled + frame_period)
+                .filter(|&next| next > now && next <= now + frame_period)
+                .or(Some(now + frame_period));
+        }
         step
     }
 
     pub fn take_remaining(&mut self) -> [i32; 2] {
         self.frames = 0;
+        self.first_post_by = None;
         std::mem::take(&mut self.remaining)
     }
 }
@@ -112,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn combines_faster_input_between_sixty_hz_updates() {
+    fn combines_faster_input_then_posts_early_without_moving_the_sixty_hz_tick() {
         let sample = Duration::from_secs_f64(1.0 / 240.0);
         let frame = Duration::from_secs_f64(1.0 / 60.0);
         let start = Instant::now();
@@ -120,12 +144,48 @@ mod tests {
         motion.push(2, -3, start, frame);
         assert_eq!(motion.step(start, frame), [2, -3]);
 
-        for index in 1..=4 {
-            let now = start + sample * index;
-            motion.push(2, -3, now, frame);
-            assert_eq!(motion.due(now), Some(start + frame));
-        }
-        assert_eq!(motion.step(start + frame, frame), [8, -12]);
+        let received = start + sample;
+        motion.push(2, -3, received, frame);
+        let next = received + Duration::from_micros(500);
+        motion.push(2, -3, next, frame);
+        let deadline = received + FIRST_POST_WAIT;
+        assert_eq!(motion.due(next), Some(deadline));
+        assert_eq!(motion.step(deadline, frame), [2, -3]);
+        assert_eq!(motion.due(deadline), Some(start + frame));
+        assert_eq!(motion.step(start + frame, frame), [2, -3]);
         assert!(motion.due(start + frame).is_none());
+    }
+
+    #[test]
+    fn a_tiny_new_sample_posts_on_its_first_tick_and_preserves_its_sign() {
+        let frame = Duration::from_secs_f64(1.0 / 240.0);
+        let start = Instant::now();
+        let mut motion = PointerMotion::default();
+        motion.push(5, 2, start, frame);
+        assert_eq!(motion.step(start, frame), [5, 2]);
+
+        let now = start + frame * 6;
+        motion.push(0, -1, now, frame);
+        assert!(motion.due(now).unwrap() <= now);
+        assert_eq!(motion.step(now, frame), [0, -1]);
+        assert!(motion.due(now).is_none());
+    }
+
+    #[test]
+    fn cancelling_motion_clears_its_early_deadline() {
+        let frame = Duration::from_millis(16);
+        let start = Instant::now();
+        let mut motion = PointerMotion::default();
+        motion.push(1, 0, start, frame);
+        motion.step(start, frame);
+        let received = start + Duration::from_millis(4);
+        motion.push(1, -2, received, frame);
+        motion.push(-1, 2, received, frame);
+        assert!(motion.due(received).is_none());
+
+        let next = received + Duration::from_millis(2);
+        motion.push(-1, 0, next, frame);
+        assert_eq!(motion.due(next), Some(next + FIRST_POST_WAIT));
+        assert_eq!(motion.step(next + FIRST_POST_WAIT, frame), [-1, 0]);
     }
 }

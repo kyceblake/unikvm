@@ -56,6 +56,8 @@ Locked Windows receiving is not implemented in the user-session agent. It requir
 
 While either machine sends input, check that its local cursor hides. End sharing with Ctrl+Shift+F10 and check that the cursor reappears at the capture position and moves normally. Test Windows-to-Mac motion at 60 Hz and at a higher refresh rate if your Mac supports one. Windows paces motion using the monitor under the pointer. macOS paces motion using the display where the session starts. Each receiver can combine faster samples between updates or spread slower samples across several display intervals. These updates use the rate reported by the OS and are not synchronized to individual scanouts. When no rate is available, the receiver applies motion as it arrives.
 
+New motion gets a first-step deadline of 1 ms when the next display-paced update is farther away. A small early step can precede the next regular update, which keeps pacing the remaining movement. Compare the cursor at slow and fast speeds, then check clicks and drags while crossing the edge.
+
 Each endpoint grants one input session at a time. If both endpoints already have outgoing requests, both requests can be denied. Press the start shortcut again on the device you want to send from. Using physical input on the receiver restores local control automatically.
 
 Both backends filter their own synthetic events. The receiver attempts to release held synthetic input on takeover, normal shutdown, stream closure, or lease expiry. The OS may prevent cleanup after permission loss, on protected desktops, or when the receiver is force-killed. The first local event can arrive before asynchronous synthetic releases finish. Test modifier and drag behavior on both desktops before relying on it.
