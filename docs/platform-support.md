@@ -39,7 +39,30 @@ cargo run --locked -p unikvm-platform --features file-drag-probe --example file_
 
 Use `--right` to test the other edge. Drag a regular file from Explorer or Finder into the highlighted strip and hold the mouse button. The probe prints the number of file references it can read before release. It declines the drop and closes after 45 seconds.
 
-The Windows test read a real Shell data object for a local test file. Apple Silicon passed the compile check. The live Explorer and Finder edge gestures still need to be checked on their respective desktops. The probe uses OLE `IDropTarget` and AppKit `NSDraggingInfo`. [Windows Shell drag data](https://learn.microsoft.com/en-us/windows/win32/shell/dataobject) · [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
+Live Explorer and Finder gestures both exposed file references before release. The Windows test also reads a real Shell data object. The probe uses OLE `IDropTarget` and AppKit `NSDraggingInfo`. [Windows Shell drag data](https://learn.microsoft.com/en-us/windows/win32/shell/dataobject) · [AppKit drag pasteboard](https://developer.apple.com/documentation/appkit/nsdragginginfo/draggingpasteboard)
+
+### Probe a native drop into Explorer or Finder
+
+Open an empty destination folder in Explorer or Finder on the desktop being tested. Keep it visible behind the terminal. Use a small disposable file outside that folder and run the probe with its path. Use `--right` on the Mac if the Mac is to the left of Windows.
+
+```sh
+cargo run --locked -p unikvm-platform --features file-drag-probe --example file_drag_probe -- --left --source "path/to/sample.txt"
+```
+
+Press and hold the left mouse button on the highlighted strip, drag into the empty folder, then release. The probe should print `Native drop target accepted a file copy.` Check that the new file matches the source and that the source remains in place. Repeat with Escape during the drag and check that the target folder stays empty. The probe uses a local file and supports one drag per run.
+
+Repeat with the other computer's pointer after switching ordinary UniKVM control to the test desktop. That checks whether the native drag accepts UniKVM's injected mouse-button and movement events. The drag probe does not change the clipboard or transfer bytes between machines. Windows uses OLE `DoDragDrop` with a Shell file data object. macOS uses an AppKit dragging session with a file URL. [Windows DoDragDrop](https://learn.microsoft.com/en-us/windows/win32/api/ole2/nf-ole2-dodragdrop) · [AppKit dragging session](https://developer.apple.com/documentation/appkit/nsview/begindraggingsession(with:event:source:))
+
+### Probe a deferred Windows drop
+
+Use the same test folder and a local sample file. The Windows probe advertises the filename and size as a Shell virtual file. Hold the drag over Explorer before you release and check that `Native target opened the file stream after release.` appears only when you drop. Check that the destination contains an identical copy. Start a fresh run with an empty destination and press Escape while holding the drag. The stream message should stay absent and the folder should stay empty. [Shell virtual file formats](https://learn.microsoft.com/en-us/windows/win32/shell/clipboard#cfstr_filecontents)
+
+```powershell
+cargo run --locked -p unikvm-platform --features file-drag-probe --example file_drag_probe -- --left --deferred "path/to/sample.txt"
+cargo test --locked -p unikvm-platform --features file-drag-probe shell_folder_copies_the_virtual_file -- --ignored --nocapture
+```
+
+The second command exercises the native Shell folder drop handler directly and verifies the destination bytes. The first checks the full pointer gesture. Deferred drops on macOS require an AppKit file promise probe.
 
 ## Run the Windows probe
 

@@ -1,10 +1,20 @@
 # Progress
 
+## Deferred Windows drop probe
+
+- Added `--deferred FILE` on Windows. The probe offers a Unicode filename and size while the drag is held. It opens a read-only stream when the released drag's target requests contents. Escape leaves the stream closed. [Windows test instructions](platform-support.md#probe-a-deferred-windows-drop)
+- The Windows COM tests verified metadata, cancellation, the release gate, and original bytes. The native Shell folder handler copied identical bytes into a temporary destination. The user reported that the interactive Explorer checks passed, and the dropped file's SHA-256 matched the source. Windows workspace checks and strict Clippy for the probe passed. Apple Silicon probe Clippy passed as a compile-time check.
+- Next, probe Finder's deferred delivery with AppKit file promises, then bind native drop requests to receiver approval on the paired connection. [AppKit file promises](https://developer.apple.com/documentation/appkit/nsfilepromiseprovider)
+
+## Native destination drop probe
+
+- Added `--source FILE` to start a copy-only native drag from the highlighted edge with a local sample file. The target app handles choosing the destination folder. [Drop probe instructions](platform-support.md#probe-a-native-drop-into-explorer-or-finder)
+- Windows formatting, workspace Clippy, tests, and build passed. The standalone Windows probe built and passed its Shell file-reference test. The user reported that the sample appeared in Explorer. The temporary destination was empty at follow-up, so the dropped file's bytes remain unverified. Apple Silicon strict Clippy passed as a compile-time check. The Finder destination drop and UniKVM-controlled pointer checks on both desktops are still pending.
+
 ## 2026-11-15 — File drag edge probe
 
 - Added a standalone native probe that checks whether Explorer and Finder supply file references while the mouse button is held at a display edge. It reports counts and leaves the source files untouched.
-- Windows passed the Shell data-object test. The Apple Silicon probe passed compile-time Clippy. Live edge gestures still need manual desktop verification.
-- Next, verify the Finder and Explorer edge gestures, then test starting a corresponding native drop on the other device. Reuse the existing approval, byte progress, and verified file transfer after a remote drop. [File drag probe instructions](platform-support.md#probe-file-drags-at-the-screen-edge)
+- Windows passed the Shell data-object test. The Apple Silicon probe passed compile-time Clippy. Manual Windows and macOS tests confirmed that Explorer and Finder expose the file before the mouse button is released. [File drag probe instructions](platform-support.md#probe-file-drags-at-the-screen-edge)
 
 ## 2026-11-15 — Native tray and transfer dialogs
 

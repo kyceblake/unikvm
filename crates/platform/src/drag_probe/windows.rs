@@ -2,23 +2,35 @@
 
 use std::{
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr::{null, null_mut},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+
+use super::Source;
+mod deferred;
 
 use unikvm_core::geometry::Edge;
 use windows::Win32::{
-    Foundation::{HWND as OleWindow, POINTL},
+    Foundation::{
+        DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND as OleWindow,
+        POINTL, S_OK,
+    },
     System::{
         Com::{DVASPECT_CONTENT, FORMATETC, IDataObject, TYMED_HGLOBAL},
         Ole::{
-            DROPEFFECT, DROPEFFECT_NONE, IDropTarget, IDropTarget_Impl, OleInitialize,
-            OleUninitialize, RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
+            DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource,
+            IDropSource_Impl, IDropTarget, IDropTarget_Impl, OleInitialize, OleUninitialize,
+            RegisterDragDrop, ReleaseStgMedium, RevokeDragDrop,
         },
-        SystemServices::MODIFIERKEYS_FLAGS,
+        SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
     },
+    UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
 };
-use windows::core::{Ref, Result, implement};
+use windows::core::{BOOL, HRESULT, HSTRING, Ref, Result, implement};
 use windows_sys::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, WPARAM},
@@ -27,8 +39,8 @@ use windows_sys::{
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
             GetSystemMetrics, MSG, PostQuitMessage, RegisterClassW, SM_CXSCREEN, SM_CYSCREEN,
-            SW_SHOWNOACTIVATE, SetTimer, ShowWindow, TranslateMessage, WM_CLOSE, WM_TIMER,
-            WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            SW_SHOWNOACTIVATE, SetTimer, ShowWindow, TranslateMessage, WM_CLOSE, WM_LBUTTONDOWN,
+            WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
     core::w,
@@ -107,8 +119,43 @@ fn references(object: &IDataObject) -> Option<Vec<PathBuf>> {
     }
 }
 
-pub fn run(edge: Edge) -> io::Result<()> {
-    let _ole = Apartment::new()?;
+#[implement(IDropSource)]
+struct FileSource(Arc<AtomicBool>);
+
+#[allow(non_snake_case)]
+impl IDropSource_Impl for FileSource_Impl {
+    fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
+        if escape.as_bool() {
+            DRAGDROP_S_CANCEL
+        } else if !keys.contains(MK_LBUTTON) {
+            self.0.store(true, Ordering::Release);
+            DRAGDROP_S_DROP
+        } else {
+            S_OK
+        }
+    }
+
+    fn GiveFeedback(&self, _effect: DROPEFFECT) -> HRESULT {
+        DRAGDROP_S_USEDEFAULTCURSORS
+    }
+}
+
+fn file_object(path: &Path, _ole: &Apartment) -> Result<IDataObject> {
+    // SAFETY: The caller keeps the OLE apartment alive while using this object.
+    unsafe {
+        let item: IShellItem = SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None)?;
+        item.BindToHandler(None, &BHID_DataObject)
+    }
+}
+
+pub fn run(edge: Edge, source: Option<Source<'_>>) -> io::Result<()> {
+    let ole = Apartment::new()?;
+    let released = Arc::new(AtomicBool::new(false));
+    let object = match source {
+        Some(Source::File(path)) => Some(file_object(path, &ole).map_err(io::Error::other)?),
+        Some(Source::Deferred(path)) => Some(deferred::file_object(path, released.clone())?),
+        None => None,
+    };
     // SAFETY: This thread owns the window, registration and message queue.
     unsafe {
         let width = 18;
@@ -147,21 +194,40 @@ pub fn run(edge: Edge) -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
         let window = Window(hwnd);
-        let target: IDropTarget = EdgeTarget.into();
-        RegisterDragDrop(OleWindow(window.0), &target).map_err(io::Error::other)?;
-        let _registration = Registration(window.0);
+        let _registration = if object.is_none() {
+            let target: IDropTarget = EdgeTarget.into();
+            RegisterDragDrop(OleWindow(window.0), &target).map_err(io::Error::other)?;
+            Some(Registration(window.0))
+        } else {
+            None
+        };
         if SetTimer(window.0, 1, 45_000, None) == 0 {
             return Err(io::Error::last_os_error());
         }
-        println!(
-            "Drag an Explorer file to the highlighted edge and hold it. The probe closes after 45 seconds."
-        );
+        if object.is_some() {
+            println!("Press on the highlighted edge and drag into an empty Explorer folder.");
+        } else {
+            println!(
+                "Drag an Explorer file to the highlighted edge and hold it. The probe closes after 45 seconds."
+            );
+        }
         ShowWindow(window.0, SW_SHOWNOACTIVATE);
         let mut event = MSG::default();
         loop {
             match GetMessageW(&mut event, null_mut(), 0, 0) {
                 -1 => return Err(io::Error::last_os_error()),
                 0 => return Ok(()),
+                _ if event.hwnd == window.0 && event.message == WM_TIMER => return Ok(()),
+                _ if event.hwnd == window.0 && event.message == WM_LBUTTONDOWN => {
+                    if let Some(object) = &object {
+                        let source: IDropSource = FileSource(released).into();
+                        let mut effect = DROPEFFECT_NONE;
+                        let result = DoDragDrop(object, &source, DROPEFFECT_COPY, &mut effect);
+                        result.ok().map_err(io::Error::other)?;
+                        super::report_drop(result == DRAGDROP_S_DROP && effect == DROPEFFECT_COPY);
+                        return Ok(());
+                    }
+                }
                 _ => {
                     TranslateMessage(&event);
                     DispatchMessageW(&event);
@@ -179,7 +245,7 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     // SAFETY: Win32 supplies this window and message. Cleanup is run by the UI thread.
     unsafe {
-        if matches!(message, WM_CLOSE | WM_TIMER) {
+        if message == WM_CLOSE {
             PostQuitMessage(0);
             0
         } else {
@@ -226,21 +292,12 @@ impl Drop for Registration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::{
-        Win32::UI::Shell::{BHID_DataObject, IShellItem, SHCreateItemFromParsingName},
-        core::HSTRING,
-    };
 
     #[test]
     fn shell_explorer_data_object_exposes_regular_file_references() {
-        let _ole = Apartment::new().unwrap();
+        let ole = Apartment::new().unwrap();
         let original = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-        // SAFETY: The Shell item and data object remain in this OLE apartment.
-        let object: IDataObject = unsafe {
-            let item: IShellItem =
-                SHCreateItemFromParsingName(&HSTRING::from(original.as_os_str()), None).unwrap();
-            item.BindToHandler(None, &BHID_DataObject).unwrap()
-        };
+        let object = file_object(&original, &ole).unwrap();
         assert_eq!(references(&object).unwrap(), vec![original]);
     }
 }
