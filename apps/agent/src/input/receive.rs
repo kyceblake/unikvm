@@ -16,7 +16,7 @@ use unikvm_protocol::input::{
 
 use super::{
     Focus,
-    timing::{InputKind, Latencies},
+    timing::{InputKind, Latencies, ReceivedSample},
 };
 
 const ADMISSION_TIMEOUT: Duration = Duration::from_millis(750);
@@ -349,7 +349,7 @@ async fn inject(
     let mut timings = options
         .diagnostics
         .then(|| Latencies::new("receive_to_native_post"));
-    let mut motion_received = None;
+    let mut motion_received: Option<ReceivedSample> = None;
     let mut was_locked = sink.is_locked_receiver();
     let mut motion = if entry.is_none() {
         pointer_pacer(sink)
@@ -375,12 +375,17 @@ async fn inject(
                         pending_return = path;
                     }
                     step = pacer.next() => {
-                        let [dx, dy] = step.context("pace pointer movement")?;
-                        if dx != 0 || dy != 0 {
+                        let ([dx, dy], late_by) = step.context("pace pointer movement")?;
+                        let empty = dx == 0 && dy == 0;
+                        if let Some(sample) = &mut motion_received {
+                            sample.paced_step(late_by, empty);
+                        }
+                        if !empty {
+                            let posting = motion_received.as_ref().map(|_| Instant::now());
                             if let Some(height) = move_pointer(sink, edge, dx, dy)? {
                                 return Ok(Some(height));
                             }
-                            record_post(&mut timings, InputKind::MouseMotion, motion_received.take());
+                            record_post(&mut timings, InputKind::MouseMotion, motion_received.take().zip(posting));
                         }
                         tokio::task::yield_now().await;
                     }
@@ -400,10 +405,8 @@ async fn inject(
 
         match frame.context("peer input lease expired")?? {
             Frame::Release => {
-                if let Some(pacer) = &mut motion
-                    && flush_motion(pacer, sink)?
-                {
-                    record_post(&mut timings, InputKind::MouseMotion, motion_received.take());
+                if let Some(pacer) = &mut motion {
+                    flush_motion(pacer, sink, &mut timings, motion_received.take())?;
                 }
                 return Ok(None);
             }
@@ -412,7 +415,7 @@ async fn inject(
                     pending_entry.is_none(),
                     "first heartbeat required before edge input"
                 );
-                let received = timings.as_ref().map(|_| Instant::now());
+                let received = timings.as_ref().map(|_| ReceivedSample::new());
                 if let Some(pacer) = &mut motion {
                     if let InputEvent::PointerMove { dx, dy } = event
                         && pacer.queue(dx, dy)
@@ -426,11 +429,9 @@ async fn inject(
                     }
                     // Preserve pointer position before discrete input, including
                     // clicks, and drain it before falling back to immediate motion.
-                    let pending = motion_received.take();
-                    if flush_motion(pacer, sink)? {
-                        record_post(&mut timings, InputKind::MouseMotion, pending);
-                    }
+                    flush_motion(pacer, sink, &mut timings, motion_received.take())?;
                 }
+                let posting = received.as_ref().map(|_| Instant::now());
                 if let InputEvent::PointerMove { dx, dy } = event {
                     if let Some(height) = move_pointer(sink, edge, dx, dy)? {
                         return Ok(Some(height));
@@ -444,7 +445,7 @@ async fn inject(
                         sink.send(event)?;
                     }
                 }
-                record_post(&mut timings, event.into(), received);
+                record_post(&mut timings, event.into(), received.zip(posting));
             }
             Frame::Heartbeat(token) => {
                 if let Some(drag) = drag.as_mut().filter(|drag| !drag.released) {
@@ -528,19 +529,29 @@ fn move_pointer(
     Ok(None)
 }
 
-fn record_post(timings: &mut Option<Latencies>, kind: InputKind, started: Option<Instant>) {
-    if let (Some(timings), Some(started)) = (timings, started) {
-        timings.record(kind, started);
+fn record_post(
+    timings: &mut Option<Latencies>,
+    kind: InputKind,
+    sample: Option<(ReceivedSample, Instant)>,
+) {
+    if let (Some(timings), Some((sample, posting))) = (timings, sample) {
+        timings.posted(kind, sample, posting);
     }
 }
 
-fn flush_motion(pacer: &mut MotionPacer, sink: &mut InputSink) -> std::io::Result<bool> {
+fn flush_motion(
+    pacer: &mut MotionPacer,
+    sink: &mut InputSink,
+    timings: &mut Option<Latencies>,
+    sample: Option<ReceivedSample>,
+) -> std::io::Result<()> {
     let [dx, dy] = pacer.take_pending();
     if dx != 0 || dy != 0 {
+        let posting = sample.as_ref().map(|_| Instant::now());
         sink.send(InputEvent::PointerMove { dx, dy })?;
-        return Ok(true);
+        record_post(timings, InputKind::MouseMotion, sample.zip(posting));
     }
-    Ok(false)
+    Ok(())
 }
 
 struct ReturnSource {

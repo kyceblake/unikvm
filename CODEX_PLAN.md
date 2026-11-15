@@ -248,7 +248,7 @@ The schema must be versioned and forward-compatible. All fields from untrusted p
 
 - Add opt-in diagnostics to regular release builds. Report separate keyboard, pointer motion, and mouse button or scroll latency measurements, plus verified file transfer throughput.
 - Record a Windows–macOS baseline in both directions at idle and during a 50 MB transfer. Keep the peer link, display refresh rates, and test files consistent for comparisons.
-- Use those results to prioritize changes to input pacing, queueing, or transfer throughput. Repeat the same test after each change and check shared input, cancellation, and file integrity.
+- Report samples above a 5 ms target by input category, with a stage breakdown for the slowest sample. Use those results to prioritize changes to input pacing, queueing, or transfer throughput. Repeat the same test after each change and check shared input, cancellation, and file integrity.
 
 **Done when:** Both directions have reproducible baselines and measured results for any tuning shipped. Diagnostics are off by default and record no key data, pointer coordinates, or file contents.
 

@@ -336,9 +336,10 @@ async fn active(
                 ensure!((HEARTBEAT_ACK..HEARTBEAT_ACK + HEARTBEAT_TOKENS).contains(&ack[0]), "invalid input acknowledgment");
                 let (sent, sample) = pending[usize::from(ack[0] - HEARTBEAT_ACK)].take().context("unexpected peer input acknowledgment")?;
                 let expires = sent + LEASE;
-                ensure!(expires > Instant::now(), "peer input acknowledgment arrived after the lease expired");
-                if let (Some(probes), Some(kind)) = (&mut probes, sample) {
-                    probes.latencies.record(kind, sent);
+                let acknowledged = Instant::now();
+                ensure!(expires > acknowledged, "peer input acknowledgment arrived after the lease expired");
+                if let (Some(probes), Some((kind, submitted))) = (&mut probes, sample) {
+                    probes.latencies.acknowledgment(kind, sent, submitted, acknowledged);
                 }
                 if !peer_stopped {
                     if expires > deadline.deadline() {
@@ -378,8 +379,7 @@ async fn active(
             probes.sample(event, now).map(|kind| {
                 let token = sequence;
                 sequence = (sequence + 1) % HEARTBEAT_TOKENS;
-                pending[usize::from(token)] = Some((now, Some(kind)));
-                token
+                (token, kind, now)
             })
         } else {
             None
@@ -393,7 +393,7 @@ async fn active(
             }
             result = timeout(WRITE_TIMEOUT, async {
                 input::write(send, frame).await?;
-                if let Some(token) = probe {
+                if let Some((token, _, _)) = probe {
                     input::write(send, Frame::Heartbeat(token)).await?;
                 }
                 std::io::Result::Ok(())
@@ -414,6 +414,8 @@ async fn active(
             } else {
                 return Err(error.into());
             }
+        } else if let Some((token, kind, started)) = probe {
+            pending[usize::from(token)] = Some((started, Some((kind, Instant::now()))));
         }
     }
 }

@@ -233,7 +233,7 @@ mod tests {
         );
         for _ in 0..2 {
             assert!(pacer.queue(12, 0));
-            let [dx, dy] = pacer.next().await.unwrap();
+            let ([dx, dy], _) = pacer.next().await.unwrap();
             assert!(dx > 0 && dy == 0);
             sink.send(InputEvent::PointerMove { dx, dy }).unwrap();
         }

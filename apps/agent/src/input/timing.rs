@@ -4,7 +4,10 @@ use tokio::time::Instant;
 use unikvm_core::input::InputEvent;
 
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
-const PROBE_INTERVAL: Duration = Duration::from_secs(1);
+const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+const BUDGET_US: u64 = 5_000;
+const BIN_US: u64 = 250;
+const BINS: usize = 129;
 
 #[derive(Clone, Copy)]
 pub(super) enum InputKind {
@@ -43,11 +46,92 @@ pub(super) struct Latencies {
     buckets: [Latency; InputKind::ALL.len()],
 }
 
-#[derive(Default)]
 struct Latency {
     samples: u64,
     sum_us: u64,
     max_us: u64,
+    over_budget: u64,
+    histogram: [u64; BINS],
+    worst: Option<Stages>,
+}
+
+#[derive(Clone, Copy)]
+enum Stages {
+    RoundTrip {
+        submit: Duration,
+        after_submit: Duration,
+    },
+    NativePost {
+        before_post: Duration,
+        post: Duration,
+        pacing: Option<Pacing>,
+    },
+}
+
+#[derive(Clone, Copy, Default)]
+struct Pacing {
+    zero_steps: u32,
+    max_late: Duration,
+}
+
+pub(super) struct ReceivedSample {
+    received: Instant,
+    pacing: Option<Pacing>,
+}
+
+impl ReceivedSample {
+    pub fn new() -> Self {
+        Self {
+            received: Instant::now(),
+            pacing: None,
+        }
+    }
+
+    pub fn paced_step(&mut self, late_by: Duration, empty: bool) {
+        let pacing = self.pacing.get_or_insert_default();
+        pacing.zero_steps += u32::from(empty);
+        pacing.max_late = pacing.max_late.max(late_by);
+    }
+}
+
+impl Default for Latency {
+    fn default() -> Self {
+        Self {
+            samples: 0,
+            sum_us: 0,
+            max_us: 0,
+            over_budget: 0,
+            histogram: [0; BINS],
+            worst: None,
+        }
+    }
+}
+
+impl Latency {
+    fn add(&mut self, elapsed: Duration, stages: Stages) {
+        let elapsed_us = elapsed.as_nanos().div_ceil(1_000) as u64;
+        self.samples += 1;
+        self.sum_us += elapsed_us;
+        self.over_budget += u64::from(elapsed_us > BUDGET_US);
+        let bin = elapsed_us.div_ceil(BIN_US).min((BINS - 1) as u64) as usize;
+        self.histogram[bin] += 1;
+        if self.worst.is_none() || elapsed_us > self.max_us {
+            self.max_us = elapsed_us;
+            self.worst = Some(stages);
+        }
+    }
+
+    fn p95_upper_us(&self) -> u64 {
+        let rank = (self.samples * 95).div_ceil(100);
+        let mut seen = 0;
+        for (index, count) in self.histogram[..BINS - 1].iter().enumerate() {
+            seen += count;
+            if seen >= rank {
+                return (index as u64 * BIN_US).min(self.max_us);
+            }
+        }
+        self.max_us
+    }
 }
 
 impl Latencies {
@@ -59,16 +143,43 @@ impl Latencies {
         }
     }
 
-    pub fn record(&mut self, kind: InputKind, started: Instant) {
-        let now = Instant::now();
-        let elapsed_us = now.duration_since(started).as_micros() as u64;
-        let bucket = &mut self.buckets[kind as usize];
-        bucket.samples += 1;
-        bucket.sum_us += elapsed_us;
-        bucket.max_us = bucket.max_us.max(elapsed_us);
-        if now.duration_since(self.since) >= REPORT_INTERVAL {
+    pub fn acknowledgment(
+        &mut self,
+        kind: InputKind,
+        sent: Instant,
+        submitted: Instant,
+        acknowledged: Instant,
+    ) {
+        self.record(
+            kind,
+            sent,
+            acknowledged,
+            Stages::RoundTrip {
+                submit: submitted.duration_since(sent),
+                after_submit: acknowledged.duration_since(submitted),
+            },
+        );
+    }
+
+    pub fn posted(&mut self, kind: InputKind, sample: ReceivedSample, posting: Instant) {
+        let posted = Instant::now();
+        self.record(
+            kind,
+            sample.received,
+            posted,
+            Stages::NativePost {
+                before_post: posting.duration_since(sample.received),
+                post: posted.duration_since(posting),
+                pacing: sample.pacing,
+            },
+        );
+    }
+
+    fn record(&mut self, kind: InputKind, started: Instant, ended: Instant, stages: Stages) {
+        self.buckets[kind as usize].add(ended.duration_since(started), stages);
+        if ended.duration_since(self.since) >= REPORT_INTERVAL {
             self.report();
-            self.since = now;
+            self.since = ended;
         }
     }
 
@@ -77,19 +188,42 @@ impl Latencies {
             .into_iter()
             .zip(std::mem::take(&mut self.buckets))
         {
-            if bucket.samples > 0 {
-                tracing::info!(
-                    target: "unikvm::diagnostics",
-                    measurement = self.measurement,
-                    input = kind.name(),
-                    samples = bucket.samples,
-                    mean_us = bucket.sum_us / bucket.samples,
-                    max_us = bucket.max_us,
-                    "input latency"
-                );
-            }
+            let Some(worst) = bucket.worst else { continue };
+            let (submit, after_submit, before_post, post, pacing) = match worst {
+                Stages::RoundTrip {
+                    submit,
+                    after_submit,
+                } => (Some(submit), Some(after_submit), None, None, None),
+                Stages::NativePost {
+                    before_post,
+                    post,
+                    pacing,
+                } => (None, None, Some(before_post), Some(post), pacing),
+            };
+            tracing::info!(
+                target: "unikvm::diagnostics",
+                measurement = self.measurement,
+                input = kind.name(),
+                samples = bucket.samples,
+                mean_us = bucket.sum_us / bucket.samples,
+                max_us = bucket.max_us,
+                p95_upper_us = bucket.p95_upper_us(),
+                budget_us = BUDGET_US,
+                over_budget = bucket.over_budget,
+                worst_submit_us = submit.map(micros),
+                worst_after_submit_us = after_submit.map(micros),
+                worst_before_post_us = before_post.map(micros),
+                worst_post_us = post.map(micros),
+                worst_zero_steps = pacing.map(|pacing| pacing.zero_steps),
+                worst_tick_late_us = pacing.map(|pacing| micros(pacing.max_late)),
+                "input latency"
+            );
         }
     }
+}
+
+fn micros(duration: Duration) -> u64 {
+    duration.as_micros() as u64
 }
 
 impl Drop for Latencies {
@@ -128,6 +262,53 @@ mod tests {
     use unikvm_core::input::{ButtonState, KeyUsage};
 
     #[test]
+    fn budget_includes_five_milliseconds_and_details_follow_the_slowest_sample() {
+        let mut latency = Latency::default();
+        let send = Stages::RoundTrip {
+            submit: Duration::from_micros(200),
+            after_submit: Duration::from_micros(4_800),
+        };
+        for _ in 0..19 {
+            latency.add(Duration::from_millis(5), send);
+        }
+        let mut motion = ReceivedSample::new();
+        motion.paced_step(Duration::from_micros(11), true);
+        motion.paced_step(Duration::from_micros(31), false);
+        let post = Stages::NativePost {
+            before_post: Duration::from_micros(4_901),
+            post: Duration::from_micros(100),
+            pacing: motion.pacing,
+        };
+        latency.add(Duration::from_micros(5_001), post);
+        assert_eq!(latency.over_budget, 1);
+        assert_eq!(latency.p95_upper_us(), 5_000);
+        latency.add(Duration::from_micros(5_000), send);
+        assert_eq!(latency.max_us, 5_001);
+        assert!(matches!(
+            latency.worst,
+            Some(Stages::NativePost { pacing: Some(Pacing { zero_steps: 1, max_late }), .. })
+                if max_late == Duration::from_micros(31)
+        ));
+    }
+
+    #[test]
+    fn percentile_uses_the_upper_bucket_and_retains_long_stalls() {
+        let mut latency = Latency::default();
+        let stages = Stages::RoundTrip {
+            submit: Duration::ZERO,
+            after_submit: Duration::ZERO,
+        };
+        for _ in 0..18 {
+            latency.add(Duration::from_millis(4), stages);
+        }
+        latency.add(Duration::from_micros(5_123), stages);
+        latency.add(Duration::from_millis(50), stages);
+        assert_eq!(latency.p95_upper_us(), 5_250);
+        latency.add(Duration::from_millis(60), stages);
+        assert_eq!(latency.p95_upper_us(), 60_000);
+    }
+
+    #[test]
     fn keyboard_and_mouse_round_trip_probes_have_separate_rate_limits() {
         let mut probes = SendProbes::new();
         let start = Instant::now();
@@ -144,7 +325,7 @@ mod tests {
             probes.sample(key, start),
             Some(InputKind::Keyboard)
         ));
-        let fast = start + Duration::from_millis(999);
+        let fast = start + PROBE_INTERVAL - Duration::from_millis(1);
         assert!(probes.sample(mouse, fast).is_none());
         assert!(probes.sample(key, fast).is_none());
         assert!(probes.sample(mouse, start + PROBE_INTERVAL).is_some());

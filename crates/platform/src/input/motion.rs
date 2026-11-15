@@ -36,14 +36,19 @@ impl MotionPacer {
         }
     }
 
-    /// Wait for one scheduled movement. This can be cancelled between network reads.
-    pub async fn next(&mut self) -> io::Result<[i32; 2]> {
+    /// Wait for a scheduled movement and report how late the step resumed.
+    /// This can be cancelled between network reads.
+    pub async fn next(&mut self) -> io::Result<([i32; 2], Duration)> {
         let now = Instant::now();
         let (Some(period), Some(due)) = (self.display.period, self.motion.due(now)) else {
             return std::future::pending().await;
         };
         self.timer.wait_until(due).await?;
-        Ok(self.motion.step(Instant::now(), period))
+        let resumed = Instant::now();
+        Ok((
+            self.motion.step(resumed, period),
+            resumed.saturating_duration_since(due),
+        ))
     }
 
     pub fn take_pending(&mut self) -> [i32; 2] {
